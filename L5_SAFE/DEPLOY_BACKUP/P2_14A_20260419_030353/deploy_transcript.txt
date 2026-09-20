@@ -1,0 +1,246 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260419030355
+Username: LXLQL\SJ_Admin
+RunAs User: LXLQL\SJ_Admin
+Configuration Name: 
+Machine: LXLQL (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -Command [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
+$ErrorActionPreference = 'Stop'
+$source = 'D:\qinai\L0_RUNTIME'
+$runtime = 'C:\L0_RUNTIME'
+$files = @(
+  'L2_CENTRAL\L2_MAIN\c7_manifest_guard.py',
+  'L2_CENTRAL\L2_MAIN\l2_central.py',
+  'L5_SAFE\G2\g2_regression_runner.py'
+)
+$baselinePath = Join-Path $runtime 'L5_SAFE\BASELINE\P2_14A_C7_LOADER_SHA256_DELTA.json'
+$stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+$backup = Join-Path $runtime "L5_SAFE\DEPLOY_BACKUP\P2_14A_$stamp"
+$transcriptPath = Join-Path $backup 'deploy_transcript.txt'
+$transcriptStarted = $false
+$deployStarted = $false
+$createdBaseline = $false
+$hashRows = @()
+
+function Invoke-RuntimeAllG2 {
+  $env:PYTHONIOENCODING = 'utf-8'
+  python (Join-Path $runtime 'L5_SAFE\G2\g2_regression_runner.py') --section all
+}
+
+function Restore-Task14AFiles {
+  foreach ($rel in $files) {
+    $backupFile = Join-Path $backup $rel
+    $dst = Join-Path $runtime $rel
+    if (Test-Path -LiteralPath $backupFile -PathType Leaf) {
+      Copy-Item -LiteralPath $backupFile -Destination $dst -Force
+    } elseif ($rel -eq 'L2_CENTRAL\L2_MAIN\c7_manifest_guard.py') {
+      if (Test-Path -LiteralPath $dst -PathType Leaf) {
+        Remove-Item -LiteralPath $dst -Force
+      }
+    } else {
+      throw "Backup missing during rollback: $backupFile"
+    }
+  }
+}
+
+try {
+  Write-Host 'TASK_14A_RUNTIME_DEPLOY_START'
+  Write-Host "User: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
+  if (-not (Test-Path -LiteralPath $source -PathType Container)) { throw "Source missing: $source" }
+  if (-not (Test-Path -LiteralPath $runtime -PathType Container)) { throw "Runtime missing: $runtime" }
+
+  $pythonProcesses = Get-CimInstance Win32_Process |
+    Where-Object { $_.Name -match 'python' -and ($_.CommandLine -match 'L0_RUNTIME|l2_central|gpu_server|g2_regression_runner|review_cli|memory_review_tool') } |
+    Select-Object ProcessId, Name, CommandLine
+  if ($pythonProcesses) {
+    $pythonProcesses | Format-List | Out-String | Write-Host
+    throw 'Runtime-related Python process is active; stop it before deployment.'
+  }
+
+  if (Get-Command Start-MpScan -ErrorAction SilentlyContinue) {
+    Write-Host 'DEFENDER_SCAN_START'
+    foreach ($rel in $files) {
+      $src = Join-Path $source $rel
+      Start-MpScan -ScanType CustomScan -ScanPath $src
+    }
+    $sourceRegexes = $files | ForEach-Object { [regex]::Escape((Join-Path $source $_)) }
+    $detections = @(Get-MpThreatDetection -ErrorAction SilentlyContinue | Where-Object {
+      $resources = ($_.Resources -join "`n")
+      foreach ($rx in $sourceRegexes) {
+        if ($resources -match $rx) { return $true }
+      }
+      return $false
+    })
+    if ($detections.Count -gt 0) {
+      $detections | Format-List | Out-String | Write-Host
+      throw 'Defender detected threat in Task 14A source file(s).'
+    }
+    Write-Host 'DEFENDER_SCAN_NO_RELATED_THREATS'
+  } else {
+    Write-Host 'DEFENDER_SCAN_SKIPPED_CMDLET_UNAVAILABLE'
+  }
+
+  New-Item -ItemType Directory -Force -Path $backup | Out-Null
+  Start-Transcript -Path $transcriptPath | Out-Null
+  $transcriptStarted = $true
+  Write-Host "BACKUP_DIR=$backup"
+
+  foreach ($rel in $files) {
+    $src = Join-Path $source $rel
+    $dst = Join-Path $runtime $rel
+    if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { throw "Missing source: $src" }
+
+    if (Test-Path -LiteralPath $dst -PathType Leaf) {
+      $backupDst = Join-Path $backup $rel
+      New-Item -ItemType Directory -Force -Path (Split-Path $backupDst) | Out-Null
+      Copy-Item -LiteralPath $dst -Destination $backupDst -Force
+      Write-Host "BACKED_UP $rel"
+    } else {
+      Write-Host "NO_PREVIOUS_RUNTIME_FILE $rel"
+    }
+
+    New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+    Copy-Item -LiteralPath $src -Destination $dst -Force
+    Write-Host "DEPLOYED $rel"
+  }
+  $deployStarted = $true
+
+  foreach ($rel in $files) {
+    $src = Join-Path $source $rel
+    $dst = Join-Path $runtime $rel
+    $srcHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+    $dstHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dst).Hash
+    $row = [pscustomobject]@{ RelativePath = $rel; Match = ($srcHash -eq $dstHash); SourceHash = $srcHash; RuntimeHash = $dstHash }
+    $hashRows += $row
+    $row | Format-List | Out-String | Write-Host
+    if ($srcHash -ne $dstHash) { throw "Hash mismatch after copy: $rel" }
+  }
+
+  $env:PYTHONIOENCODING = 'utf-8'
+  Write-Host 'RUN_RUNTIME_G2_C7'
+  python (Join-Path $runtime 'L5_SAFE\G2\g2_regression_runner.py') --section c7
+  if ($LASTEXITCODE -ne 0) { throw 'Runtime G2 c7 failed' }
+  Write-Host 'RUN_RUNTIME_G2_ALL'
+  python (Join-Path $runtime 'L5_SAFE\G2\g2_regression_runner.py') --section all
+  if ($LASTEXITCODE -ne 0) { throw 'Runtime G2 all failed' }
+
+  Write-Host 'RUN_C7_ZERO_ENABLED_CHECK'
+  python -c "import json, pathlib; p=pathlib.Path(r'C:\L0_RUNTIME\L2_CENTRAL\C7_PLUGINS\manifest.json'); m=json.loads(p.read_text(encoding='utf-8')); assert m.get('modules') == []; print('C7_ZERO_ENABLED_OK')"
+  if ($LASTEXITCODE -ne 0) { throw 'C7 zero-enabled check failed' }
+
+  Write-Host 'RUN_AST_CHECK'
+  python -c "import ast, pathlib; [ast.parse(p.read_text(encoding='utf-8')) for p in [pathlib.Path(r'C:\L0_RUNTIME\L2_CENTRAL\L2_MAIN\c7_manifest_guard.py'), pathlib.Path(r'C:\L0_RUNTIME\L2_CENTRAL\L2_MAIN\l2_central.py'), pathlib.Path(r'C:\L0_RUNTIME\L5_SAFE\G2\g2_regression_runner.py')]]; print('AST_OK')"
+  if ($LASTEXITCODE -ne 0) { throw 'AST check failed' }
+
+  $baselineDir = Split-Path $baselinePath
+  New-Item -ItemType Directory -Force -Path $baselineDir | Out-Null
+  $baselineFiles = foreach ($rel in $files) {
+    $dst = Join-Path $runtime $rel
+    $item = Get-Item -LiteralPath $dst
+    [pscustomobject]@{
+      relative_path = $rel
+      sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $dst).Hash
+      size = $item.Length
+      last_write_time = $item.LastWriteTimeUtc.ToString('o')
+    }
+  }
+  $baseline = [ordered]@{
+    generated_at = (Get-Date).ToUniversalTime().ToString('o')
+    generated_by = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    runtime_root = $runtime
+    task_id = 'Task 14A'
+    files = @($baselineFiles)
+    g2_c7_status = 'G2_REGRESSION_OK'
+    g2_all_status = 'G2_REGRESSION_OK'
+    c7_status = 'modules_empty'
+    notes = 'C7 loader hardened; no real plugin enabled'
+  }
+  $baseline | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $baselinePath -Encoding UTF8
+  $createdBaseline = $true
+
+  $parsed = Get-Content -LiteralPath $baselinePath -Raw -Encoding UTF8 | ConvertFrom-Json
+  if ($parsed.task_id -ne 'Task 14A') { throw 'P2 delta baseline task_id mismatch' }
+  foreach ($file in $parsed.files) {
+    $dst = Join-Path $runtime $file.relative_path
+    if (-not (Test-Path -LiteralPath $dst -PathType Leaf)) { throw "Baseline target missing: $($file.relative_path)" }
+    $liveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dst).Hash
+    if ($liveHash -ne $file.sha256) { throw "Baseline hash mismatch: $($file.relative_path)" }
+  }
+
+  Write-Host 'TASK_14A_RUNTIME_DEPLOY_OK'
+  Write-Host 'P2_14A_DELTA_BASELINE_WRITTEN'
+  Write-Host "BASELINE_PATH=$baselinePath"
+  Write-Host 'READY_FOR_TASK_14B_PLAN'
+}
+catch {
+  Write-Host "TASK_14A_RUNTIME_DEPLOY_BLOCKED: $($_.Exception.Message)"
+  if ($deployStarted) {
+    Write-Host 'ROLLBACK_START'
+    Restore-Task14AFiles
+    if ($createdBaseline -and (Test-Path -LiteralPath $baselinePath -PathType Leaf)) {
+      Remove-Item -LiteralPath $baselinePath -Force
+    }
+    Write-Host 'ROLLBACK_G2_ALL'
+    try { Invoke-RuntimeAllG2 } catch { Write-Host "ROLLBACK_G2_ALL_FAILED: $($_.Exception.Message)" }
+    Write-Host 'ROLLBACK_DONE'
+  }
+  throw
+}
+finally {
+  if ($transcriptStarted) {
+    Stop-Transcript | Out-Null
+    Write-Host "TRANSCRIPT_PATH=$transcriptPath"
+  }
+}
+Process ID: 31424
+PSVersion: 5.1.26100.7920
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.7920
+BuildVersion: 10.0.26100.7920
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+BACKUP_DIR=C:\L0_RUNTIME\L5_SAFE\DEPLOY_BACKUP\P2_14A_20260419_030353
+NO_PREVIOUS_RUNTIME_FILE L2_CENTRAL\L2_MAIN\c7_manifest_guard.py
+DEPLOYED L2_CENTRAL\L2_MAIN\c7_manifest_guard.py
+BACKED_UP L2_CENTRAL\L2_MAIN\l2_central.py
+DEPLOYED L2_CENTRAL\L2_MAIN\l2_central.py
+BACKED_UP L5_SAFE\G2\g2_regression_runner.py
+DEPLOYED L5_SAFE\G2\g2_regression_runner.py
+
+
+RelativePath : L2_CENTRAL\L2_MAIN\c7_manifest_guard.py
+Match        : True
+SourceHash   : 4CC6CA97BCB60F916C810D137486A96E4CB65019D4010F125D6880AB73AB5C69
+RuntimeHash  : 4CC6CA97BCB60F916C810D137486A96E4CB65019D4010F125D6880AB73AB5C69
+
+
+RelativePath : L2_CENTRAL\L2_MAIN\l2_central.py
+Match        : True
+SourceHash   : 62CBDEAE017FD8A3A8D7F1098F091A8ECC5130AC96B3BF38165CF047B1826120
+RuntimeHash  : 62CBDEAE017FD8A3A8D7F1098F091A8ECC5130AC96B3BF38165CF047B1826120
+
+
+RelativePath : L5_SAFE\G2\g2_regression_runner.py
+Match        : True
+SourceHash   : BFF5EA48E7073708BC14F44B2F3451DF61C8A6525C2E3EC28011CC46AB9879B3
+RuntimeHash  : BFF5EA48E7073708BC14F44B2F3451DF61C8A6525C2E3EC28011CC46AB9879B3
+RUN_RUNTIME_G2_C7
+
+RUN_RUNTIME_G2_ALL
+
+RUN_C7_ZERO_ENABLED_CHECK
+
+RUN_AST_CHECK
+
+TASK_14A_RUNTIME_DEPLOY_OK
+P2_14A_DELTA_BASELINE_WRITTEN
+BASELINE_PATH=C:\L0_RUNTIME\L5_SAFE\BASELINE\P2_14A_C7_LOADER_SHA256_DELTA.json
+READY_FOR_TASK_14B_PLAN
+**********************
+Windows PowerShell transcript end
+End time: 20260419030355
+**********************

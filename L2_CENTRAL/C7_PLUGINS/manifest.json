@@ -1,0 +1,26 @@
+{
+  "schema_version": "phase1.c7_manifest.v1",
+  "status": "skeleton_only",
+  "security_note": "Current loader only consumes modules. All policy fields are declarations until loader hardening is implemented.",
+  "entry_contract": {
+    "approved_chain_entry": "submit_to_chain(text, source)",
+    "forbidden_direct_access": [
+      "C5_LLM_CALL",
+      "L1_MEMORY\\passed",
+      "L0_MOTHER",
+      "L0_SOURCE",
+      "L0_PROJECTION"
+    ]
+  },
+  "permission_policy": {
+    "default_enabled": false,
+    "write_whitelist": [],
+    "forbidden": [
+      "C:\\L0_RUNTIME\\L0_MOTHER",
+      "C:\\L0_RUNTIME\\L1_MEMORY\\passed",
+      "C:\\L0_RUNTIME\\L2_CENTRAL\\C5_LLM_CALL",
+      "D:\\L0_RUNTIME"
+    ]
+  },
+  "modules": []
+}

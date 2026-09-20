@@ -1,0 +1,44 @@
+{
+    "base_dir": "C:\\L0_RUNTIME\\L2_CENTRAL",
+    "sys_paths": [
+        "C1_Auth",
+        "C2_MEMORY",
+        "C3_INPUT_GUARD",
+        "C4_OUTPUT_CHECK",
+        "C5_LLM_CALL",
+        "C5_LLM_CALL\\script",
+        "C6_WRITEBACK"
+    ],
+    "modules": [
+        {
+            "name": "C1权限校验",
+            "required": true,
+            "error_msg": "「C1 拦截」 安全门禁模块不可用，系统锁定。"
+        },
+        {
+            "name": "C2记忆读取",
+            "required": false,
+            "error_msg": "C2 组件导入失败，记忆功能暂时不可用。"
+        },
+        {
+            "name": "C3输入过滤",
+            "required": true,
+            "error_msg": "「C3 拦截」 护栏模块不可用，为防注入拒绝响应。"
+        },
+        {
+            "name": "C4输出校验",
+            "required": false,
+            "error_msg": "C4 校验模块缺失，将触发安全降级。"
+        },
+        {
+            "name": "C5推理引擎",
+            "required": true,
+            "error_msg": "C5 推理模块缺失，将触发降级预案。"
+        },
+        {
+            "name": "C6记忆写入",
+            "required": false,
+            "error_msg": "C6 组件导入失败，记忆功能暂时不可用。"
+        }
+    ]
+}

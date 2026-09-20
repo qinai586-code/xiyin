@@ -1,0 +1,30 @@
+﻿{
+    "generated_at":  "2026-04-18T19:03:55.3763747Z",
+    "generated_by":  "LXLQL\\SJ_Admin",
+    "runtime_root":  "C:\\L0_RUNTIME",
+    "task_id":  "Task 14A",
+    "files":  [
+                  {
+                      "relative_path":  "L2_CENTRAL\\L2_MAIN\\c7_manifest_guard.py",
+                      "sha256":  "4CC6CA97BCB60F916C810D137486A96E4CB65019D4010F125D6880AB73AB5C69",
+                      "size":  8764,
+                      "last_write_time":  "2026-04-18T18:54:21.0832337Z"
+                  },
+                  {
+                      "relative_path":  "L2_CENTRAL\\L2_MAIN\\l2_central.py",
+                      "sha256":  "62CBDEAE017FD8A3A8D7F1098F091A8ECC5130AC96B3BF38165CF047B1826120",
+                      "size":  14287,
+                      "last_write_time":  "2026-04-18T18:55:30.6559048Z"
+                  },
+                  {
+                      "relative_path":  "L5_SAFE\\G2\\g2_regression_runner.py",
+                      "sha256":  "BFF5EA48E7073708BC14F44B2F3451DF61C8A6525C2E3EC28011CC46AB9879B3",
+                      "size":  37848,
+                      "last_write_time":  "2026-04-18T18:51:18.3719310Z"
+                  }
+              ],
+    "g2_c7_status":  "G2_REGRESSION_OK",
+    "g2_all_status":  "G2_REGRESSION_OK",
+    "c7_status":  "modules_empty",
+    "notes":  "C7 loader hardened; no real plugin enabled"
+}

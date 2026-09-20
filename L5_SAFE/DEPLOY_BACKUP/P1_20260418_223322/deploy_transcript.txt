@@ -1,0 +1,176 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260418223322
+Username: LXLQL\SJ_Admin
+RunAs User: LXLQL\SJ_Admin
+Configuration Name: 
+Machine: LXLQL (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -Command [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
+$ErrorActionPreference = 'Stop'
+$source = 'D:\qinai\L0_RUNTIME'
+$runtime = 'C:\L0_RUNTIME'
+$files = @(
+  'L5_SAFE\ADMIN_TOOLS\snapshot_tool.py',
+  'L5_SAFE\ADMIN_TOOLS\rollback_tool.py',
+  'L5_SAFE\l5_audit_logger.py',
+  'L2_CENTRAL\C1_Auth\c1_gatekeeper.py',
+  'L2_CENTRAL\C4_OUTPUT_CHECK\c4_persona_rule.txt',
+  'L2_CENTRAL\C5_LLM_CALL\script\c5_llm_gatekeeper.py',
+  'L2_CENTRAL\C7_PLUGINS\manifest.json',
+  'L5_SAFE\ADMIN_TOOLS\memory_review_tool.py',
+  'L5_SAFE\ADMIN_TOOLS\review_cli.py',
+  'L5_SAFE\G2\g2_regression_runner.py',
+  'L5_SAFE\G4_MELTDOWN\g4_executor.py',
+  'L3\l3_protocol_contract.py',
+  'L4\l4_gateway_contract.py',
+  'L2_CENTRAL\L2_MAIN\qinai_security_check.py'
+)
+
+$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+Write-Host "DEPLOY_USER=$currentUser"
+if ($currentUser -notmatch 'SJ_Admin$') { throw "Deployment must be run by SJ_Admin, got $currentUser" }
+if (-not (Test-Path -LiteralPath $source -PathType Container)) { throw "Source missing: $source" }
+if (-not (Test-Path -LiteralPath $runtime -PathType Container)) { throw "Runtime missing: $runtime" }
+
+$stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+$backup = Join-Path $runtime "L5_SAFE\DEPLOY_BACKUP\P1_$stamp"
+New-Item -ItemType Directory -Force -Path $backup | Out-Null
+$transcript = Join-Path $backup 'deploy_transcript.txt'
+Start-Transcript -Path $transcript | Out-Null
+try {
+  Write-Host "DEPLOY_BACKUP=$backup"
+  foreach ($rel in $files) {
+    $src = Join-Path $source $rel
+    $dst = Join-Path $runtime $rel
+    if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { throw "Missing source: $src" }
+
+    $srcResolved = (Resolve-Path -LiteralPath $src).Path
+    if (-not $srcResolved.StartsWith($source, [System.StringComparison]::OrdinalIgnoreCase)) { throw "Source escaped root: $srcResolved" }
+
+    if (Test-Path -LiteralPath $dst -PathType Leaf) {
+      $backupDst = Join-Path $backup $rel
+      New-Item -ItemType Directory -Force -Path (Split-Path $backupDst) | Out-Null
+      Copy-Item -LiteralPath $dst -Destination $backupDst -Force
+      Write-Host "BACKED_UP $dst -> $backupDst"
+    } else {
+      Write-Host "NEW_FILE $dst"
+    }
+
+    New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+    Copy-Item -LiteralPath $src -Destination $dst -Force
+    Write-Host "COPIED $src -> $dst"
+  }
+
+  Write-Host 'HASH_COMPARE_BEGIN'
+  $hashResults = foreach ($rel in $files) {
+    $src = Join-Path $source $rel
+    $dst = Join-Path $runtime $rel
+    $srcHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+    $dstHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dst).Hash
+    [pscustomobject]@{ RelativePath = $rel; Match = ($srcHash -eq $dstHash); SourceHash = $srcHash; RuntimeHash = $dstHash }
+  }
+  $hashResults | Format-Table -AutoSize
+  if ($hashResults | Where-Object { -not $_.Match }) { throw 'Hash mismatch after deployment' }
+
+  Write-Host 'RUN_G2_ALL_BEGIN'
+  python (Join-Path $runtime 'L5_SAFE\G2\g2_regression_runner.py') --section all
+  if ($LASTEXITCODE -ne 0) { throw "G2 all failed with exit code $LASTEXITCODE" }
+
+  Write-Host 'RUN_G2_SECURITY_CHECK_BEGIN'
+  python (Join-Path $runtime 'L5_SAFE\G2\g2_regression_runner.py') --section security_check
+  if ($LASTEXITCODE -ne 0) { throw "G2 security_check failed with exit code $LASTEXITCODE" }
+
+  Write-Host 'C7_ZERO_ENABLED_BEGIN'
+  python -c "import json, pathlib; p=pathlib.Path(r'C:\L0_RUNTIME\L2_CENTRAL\C7_PLUGINS\manifest.json'); m=json.loads(p.read_text(encoding='utf-8')); assert m.get('modules') == []; print('C7_ZERO_ENABLED_OK')"
+  if ($LASTEXITCODE -ne 0) { throw "C7 zero-enabled check failed with exit code $LASTEXITCODE" }
+
+  Write-Host 'L3_L4_AST_BEGIN'
+  python -c "import ast, pathlib; [ast.parse(p.read_text(encoding='utf-8')) for p in [pathlib.Path(r'C:\L0_RUNTIME\L3\l3_protocol_contract.py'), pathlib.Path(r'C:\L0_RUNTIME\L4\l4_gateway_contract.py'), pathlib.Path(r'C:\L0_RUNTIME\L5_SAFE\G2\g2_regression_runner.py')]]; print('AST_OK')"
+  if ($LASTEXITCODE -ne 0) { throw "L3/L4 AST check failed with exit code $LASTEXITCODE" }
+
+  Write-Host 'OLD_TOOL_SCAN_BEGIN'
+  $expected = @()
+  foreach ($rel in @('L5_SAFE\ADMIN_TOOLS\memory_review_tool.py','L5_SAFE\ADMIN_TOOLS\snapshot_tool.py','L5_SAFE\ADMIN_TOOLS\rollback_tool.py')) {
+    $p = Join-Path $runtime $rel
+    if (Test-Path -LiteralPath $p -PathType Leaf) {
+      $expected += (Resolve-Path -LiteralPath $p).Path
+    } else {
+      [pscustomobject]@{ ExpectedEntry = "MISSING_EXPECTED::$p" }
+    }
+  }
+  $toolScan = Get-ChildItem -Path $runtime -Recurse -Force -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -in @('memory_review_tool.py','snapshot_tool.py','rollback_tool.py') } |
+    Select-Object FullName, Length, LastWriteTime, @{Name='Classification';Expression={ if ($expected -contains $_.FullName) { 'EXPECTED_ADMIN_TOOLS_COPY' } else { 'UNEXPECTED_DUPLICATE_PENDING_SJ_ADMIN_REVIEW' } }}
+  $toolScan | Format-Table -AutoSize
+  if ($toolScan | Where-Object { $_.Classification -eq 'UNEXPECTED_DUPLICATE_PENDING_SJ_ADMIN_REVIEW' }) { throw 'Unexpected duplicate governance tool found' }
+
+  Write-Host 'DEPLOYMENT_OK'
+} finally {
+  Stop-Transcript | Out-Null
+  Write-Host "TRANSCRIPT=$transcript"
+}
+Process ID: 13252
+PSVersion: 5.1.26100.7920
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.7920
+BuildVersion: 10.0.26100.7920
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+DEPLOY_BACKUP=C:\L0_RUNTIME\L5_SAFE\DEPLOY_BACKUP\P1_20260418_223322
+NEW_FILE C:\L0_RUNTIME\L5_SAFE\ADMIN_TOOLS\snapshot_tool.py
+COPIED D:\qinai\L0_RUNTIME\L5_SAFE\ADMIN_TOOLS\snapshot_tool.py -> C:\L0_RUNTIME\L5_SAFE\ADMIN_TOOLS\snapshot_tool.py
+NEW_FILE C:\L0_RUNTIME\L5_SAFE\ADMIN_TOOLS\rollback_tool.py
+COPIED D:\qinai\L0_RUNTIME\L5_SAFE\ADMIN_TOOLS\rollback_tool.py -> C:\L0_RUNTIME\L5_SAFE\ADMIN_TOOLS\rollback_tool.py
+BACKED_UP C:\L0_RUNTIME\L5_SAFE\l5_audit_logger.py -> C:\L0_RUNTIME\L5_SAFE\DEPLOY_BACKUP\P1_20260418_223322\L5_SAFE\l5_audit_logger.py
+COPIED D:\qinai\L0_RUNTIME\L5_SAFE\l5_audit_logger.py -> C:\L0_RUNTIME\L5_SAFE\l5_audit_logger.py
+BACKED_UP C:\L0_RUNTIME\L2_CENTRAL\C1_Auth\c1_gatekeeper.py -> C:\L0_RUNTIME\L5_SAFE\DEPLOY_BACKUP\P1_20260418_223322\L2_CENTRAL\C1_Auth\c1_gatekeeper.py
+COPIED D:\qinai\L0_RUNTIME\L2_CENTRAL\C1_Auth\c1_gatekeeper.py -> C:\L0_RUNTIME\L2_CENTRAL\C1_Auth\c1_gatekeeper.py
+BACKED_UP C:\L0_RUNTIME\L2_CENTRAL\C4_OUTPUT_CHECK\c4_persona_rule.txt -> C:\L0_RUNTIME\L5_SAFE\DEPLOY_BACKUP\P1_20260418_223322\L2_CENTRAL\C4_OUTPUT_CHECK\c4_persona_rule.txt
+COPIED D:\qinai\L0_RUNTIME\L2_CENTRAL\C4_OUTPUT_CHECK\c4_persona_rule.txt -> C:\L0_RUNTIME\L2_CENTRAL\C4_OUTPUT_CHECK\c4_persona_rule.txt
+BACKED_UP C:\L0_RUNTIME\L2_CENTRAL\C5_LLM_CALL\script\c5_llm_gatekeeper.py -> C:\L0_RUNTIME\L5_SAFE\DEPLOY_BACKUP\P1_20260418_223322\L2_CENTRAL\C5_LLM_CALL\script\c5_llm_gatekeeper.py
+COPIED D:\qinai\L0_RUNTIME\L2_CENTRAL\C5_LLM_CALL\script\c5_llm_gatekeeper.py -> C:\L0_RUNTIME\L2_CENTRAL\C5_LLM_CALL\script\c5_llm_gatekeeper.py
+NEW_FILE C:\L0_RUNTIME\L2_CENTRAL\C7_PLUGINS\manifest.json
+COPIED D:\qinai\L0_RUNTIME\L2_CENTRAL\C7_PLUGINS\manifest.json -> C:\L0_RUNTIME\L2_CENTRAL\C7_PLUGINS\manifest.json
+NEW_FILE C:\L0_RUNTIME\L5_SAFE\ADMIN_TOOLS\memory_review_tool.py
+COPIED D:\qinai\L0_RUNTIME\L5_SAFE\ADMIN_TOOLS\memory_review_tool.py -> C:\L0_RUNTIME\L5_SAFE\ADMIN_TOOLS\memory_review_tool.py
+NEW_FILE C:\L0_RUNTIME\L5_SAFE\ADMIN_TOOLS\review_cli.py
+COPIED D:\qinai\L0_RUNTIME\L5_SAFE\ADMIN_TOOLS\review_cli.py -> C:\L0_RUNTIME\L5_SAFE\ADMIN_TOOLS\review_cli.py
+NEW_FILE C:\L0_RUNTIME\L5_SAFE\G2\g2_regression_runner.py
+COPIED D:\qinai\L0_RUNTIME\L5_SAFE\G2\g2_regression_runner.py -> C:\L0_RUNTIME\L5_SAFE\G2\g2_regression_runner.py
+NEW_FILE C:\L0_RUNTIME\L5_SAFE\G4_MELTDOWN\g4_executor.py
+COPIED D:\qinai\L0_RUNTIME\L5_SAFE\G4_MELTDOWN\g4_executor.py -> C:\L0_RUNTIME\L5_SAFE\G4_MELTDOWN\g4_executor.py
+NEW_FILE C:\L0_RUNTIME\L3\l3_protocol_contract.py
+COPIED D:\qinai\L0_RUNTIME\L3\l3_protocol_contract.py -> C:\L0_RUNTIME\L3\l3_protocol_contract.py
+NEW_FILE C:\L0_RUNTIME\L4\l4_gateway_contract.py
+COPIED D:\qinai\L0_RUNTIME\L4\l4_gateway_contract.py -> C:\L0_RUNTIME\L4\l4_gateway_contract.py
+BACKED_UP C:\L0_RUNTIME\L2_CENTRAL\L2_MAIN\qinai_security_check.py -> C:\L0_RUNTIME\L5_SAFE\DEPLOY_BACKUP\P1_20260418_223322\L2_CENTRAL\L2_MAIN\qinai_security_check.py
+COPIED D:\qinai\L0_RUNTIME\L2_CENTRAL\L2_MAIN\qinai_security_check.py -> C:\L0_RUNTIME\L2_CENTRAL\L2_MAIN\qinai_security_check.py
+HASH_COMPARE_BEGIN
+
+RelativePath                                       Match SourceHash
+------------                                       ----- ----------
+L5_SAFE\ADMIN_TOOLS\snapshot_tool.py                True 3D46ECED63CF1F45E6B2D555D83C12D02AB7808A93A1DBAA9CE86957FB9...
+L5_SAFE\ADMIN_TOOLS\rollback_tool.py                True 323978C87AD24289827488D213C3104CF29BA40BD36E79176EB2AC2CC96...
+L5_SAFE\l5_audit_logger.py                          True 6BAE4530400F3871287501E71094622A1F425CDDC403C577F00F3E02F97...
+L2_CENTRAL\C1_Auth\c1_gatekeeper.py                 True 70616ED5CB776C2158E02425C11D39BBAAC117700CB28E5C9B7B032E653...
+L2_CENTRAL\C4_OUTPUT_CHECK\c4_persona_rule.txt      True 18DE023B630F2A5CAF79D0E69BCCF2F36AD95EBBF47DC0E1399053AED92...
+L2_CENTRAL\C5_LLM_CALL\script\c5_llm_gatekeeper.py  True EF2781A75026F6011DC98AD128347492D2D43FCB3323F36EA5CF9CBE2A0...
+L2_CENTRAL\C7_PLUGINS\manifest.json                 True 681F797EFE2772A11AB539ECB1809AB0BEA4C8622B806273A803353C696...
+L5_SAFE\ADMIN_TOOLS\memory_review_tool.py           True F9162DD2441209303F5AE2A7B84899B17F96C074CD537B5CEC56C151CA0...
+L5_SAFE\ADMIN_TOOLS\review_cli.py                   True 8DC860F83A8A42574DD25B510DAA7BEC20626B0A56BCC53ADC6FD71CC6A...
+L5_SAFE\G2\g2_regression_runner.py                  True 45665C8CBB519E88A25A9A2318ED02F521A4E4D5006C716054F5B669124...
+L5_SAFE\G4_MELTDOWN\g4_executor.py                  True F3FF7BCB7A1413959E931FCE637768AD5F2A7622FCCE567CE73DCFE1E91...
+L3\l3_protocol_contract.py                          True 54E8D2AFD8EF46C3BB47C996AC8C24E24A81E60BABA30AA2FDEEFEE3D5C...
+L4\l4_gateway_contract.py                           True CDD654288BB5E082F6DCC84C3AD4E75ECA3838BFF2B628D8B2D0E682BEF...
+L2_CENTRAL\L2_MAIN\qinai_security_check.py          True 28D834078FE41CFEEEB4D7281682E85A4F794CD3962166FD42FABF2BEC9...
+
+
+RUN_G2_ALL_BEGIN
+
+**********************
+Windows PowerShell transcript end
+End time: 20260418223323
+**********************

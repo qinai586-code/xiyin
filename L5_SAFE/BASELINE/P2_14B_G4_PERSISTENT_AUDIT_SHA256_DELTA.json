@@ -1,0 +1,17 @@
+{
+  "schema_version": "P2_14B_G4_PERSISTENT_AUDIT.v1",
+  "generated_at": "2026-04-20T12:28:28",
+  "task": "Task_14B_G4_Persistent_Audit_Redeployment",
+  "ruling": "Option-A Archive-And-Anchor approved 2026-04-19; G3 bridge fix deployed 2026-04-20; Task 14B execution authorized by SJ_Admin 2026-04-20",
+  "files": {
+    "g4_executor.py": "bda11332f95d1857ad7ce93ec66d53a819912fc4adb2aa55571f1003f047b6f6"
+  },
+  "g4_new_capabilities": [
+    "safe_write_g4_audit_log",
+    "_ensure_l5_safe_import_path",
+    "_audit_decision"
+  ],
+  "g4_self_test": "G4_SELF_TEST_OK",
+  "dry_run_enforced": true,
+  "writes_performed": false
+}

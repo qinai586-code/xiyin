@@ -1,0 +1,10 @@
+# XIYIN runtime machine/inference configuration (single source for
+# inference endpoint + machine state locations). Deployed values may be
+# re-registered per machine; the code/data roots are NOT authorized here.
+[inference]
+endpoint = "http://127.0.0.1:11434/generate"
+
+[machine]
+# A5/PARTIAL: heartbeat producer chain NOT VERIFIED this round; default
+# preserves the original literal location (behavior unchanged).
+heartbeat_dir = "C:\\Users\\SJ_Run\\AppData\\Local\\Temp\\qinai_launcher_runtime_state"

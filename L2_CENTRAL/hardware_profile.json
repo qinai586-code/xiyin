@@ -1,0 +1,26 @@
+{
+  "profile_name": "qinai_local_primary",
+  "owner": "SJ_Admin",
+  "platform_priority": [
+    "nvidia_cuda",
+    "apple_silicon",
+    "amd_reserved"
+  ],
+  "runtime_mode": "local_only",
+  "model_runtime": {
+    "backend": "llama_cpp",
+    "context_window": 8192,
+    "max_generation_tokens": 256,
+    "gpu_required": true
+  },
+  "memory_policy": {
+    "write_mode": "wait_check_only",
+    "auto_pass_to_passed": false,
+    "snapshot_required_before_restore": true
+  },
+  "security_policy": {
+    "dual_account_required": true,
+    "sidecar_direct_core_bypass": false,
+    "cloud_sync_allowed": false
+  }
+}

@@ -1,0 +1,8 @@
+# Generated from the pre-existing Windows accounts; no username authorization.
+[identity]
+runtime_sids = ["S-1-5-21-1849734613-3652724139-3227884506-1003"]
+reviewer_sids = ["S-1-5-21-1849734613-3652724139-3227884506-1002"]
+[identity.review_display]
+"S-1-5-21-1849734613-3652724139-3227884506-1002" = "SJ_Admin"
+[runtime]
+allowed_cwd_roots = ["C:/L0_RUNTIME/L2_CENTRAL"]

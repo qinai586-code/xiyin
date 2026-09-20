@@ -1,0 +1,254 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260419033429
+Username: LXLQL\SJ_Admin
+RunAs User: LXLQL\SJ_Admin
+Configuration Name: 
+Machine: LXLQL (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -Command [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
+$ErrorActionPreference = 'Stop'
+$source = 'D:\qinai\L0_RUNTIME'
+$runtime = 'C:\L0_RUNTIME'
+$files = @(
+  'L5_SAFE\l5_audit_logger.py',
+  'L5_SAFE\G4_MELTDOWN\g4_executor.py',
+  'L5_SAFE\G2\g2_regression_runner.py'
+)
+$baselinePath = Join-Path $runtime 'L5_SAFE\BASELINE\P2_14B_G4_AUDIT_SHA256_DELTA.json'
+$stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+$backup = Join-Path $runtime "L5_SAFE\DEPLOY_BACKUP\P2_14B_$stamp"
+$transcriptPath = Join-Path $backup 'deploy_transcript.txt'
+$transcriptStarted = $false
+$deployStarted = $false
+$createdBaseline = $false
+$smokeOutput = ''
+$g3VerifyOutput = ''
+
+function Invoke-RuntimeAllG2 {
+  $env:PYTHONIOENCODING = 'utf-8'
+  python (Join-Path $runtime 'L5_SAFE\G2\g2_regression_runner.py') --section all
+}
+
+function Restore-Task14BFiles {
+  foreach ($rel in $files) {
+    $backupFile = Join-Path $backup $rel
+    $dst = Join-Path $runtime $rel
+    if (Test-Path -LiteralPath $backupFile -PathType Leaf) {
+      Copy-Item -LiteralPath $backupFile -Destination $dst -Force
+    } else {
+      throw "Backup missing during rollback: $backupFile"
+    }
+  }
+}
+
+try {
+  Write-Host 'TASK_14B_RUNTIME_DEPLOY_START'
+  Write-Host "User: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
+  if (-not (Test-Path -LiteralPath $source -PathType Container)) { throw "Source missing: $source" }
+  if (-not (Test-Path -LiteralPath $runtime -PathType Container)) { throw "Runtime missing: $runtime" }
+
+  $pythonProcesses = Get-CimInstance Win32_Process |
+    Where-Object { $_.Name -match 'python' -and ($_.CommandLine -match 'L0_RUNTIME|l2_central|gpu_server|g2_regression_runner|review_cli|memory_review_tool') } |
+    Select-Object ProcessId, Name, CommandLine
+  if ($pythonProcesses) {
+    $pythonProcesses | Format-List | Out-String | Write-Host
+    throw 'Runtime-related Python process is active; stop it before deployment.'
+  }
+
+  if (Get-Command Start-MpScan -ErrorAction SilentlyContinue) {
+    Write-Host 'DEFENDER_SCAN_START'
+    foreach ($rel in $files) {
+      $src = Join-Path $source $rel
+      Start-MpScan -ScanType CustomScan -ScanPath $src
+    }
+    $sourceRegexes = $files | ForEach-Object { [regex]::Escape((Join-Path $source $_)) }
+    $detections = @(Get-MpThreatDetection -ErrorAction SilentlyContinue | Where-Object {
+      $resources = ($_.Resources -join "`n")
+      foreach ($rx in $sourceRegexes) {
+        if ($resources -match $rx) { return $true }
+      }
+      return $false
+    })
+    if ($detections.Count -gt 0) {
+      $detections | Format-List | Out-String | Write-Host
+      throw 'Defender detected threat in Task 14B source file(s).'
+    }
+    Write-Host 'DEFENDER_SCAN_NO_RELATED_THREATS'
+  } else {
+    Write-Host 'DEFENDER_SCAN_SKIPPED_CMDLET_UNAVAILABLE'
+  }
+
+  New-Item -ItemType Directory -Force -Path $backup | Out-Null
+  Start-Transcript -Path $transcriptPath | Out-Null
+  $transcriptStarted = $true
+  Write-Host "BACKUP_DIR=$backup"
+
+  foreach ($rel in $files) {
+    $src = Join-Path $source $rel
+    $dst = Join-Path $runtime $rel
+    if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { throw "Missing source: $src" }
+    if (-not (Test-Path -LiteralPath $dst -PathType Leaf)) { throw "Missing runtime target before backup: $dst" }
+
+    $backupDst = Join-Path $backup $rel
+    New-Item -ItemType Directory -Force -Path (Split-Path $backupDst) | Out-Null
+    Copy-Item -LiteralPath $dst -Destination $backupDst -Force
+    Write-Host "BACKED_UP $rel"
+
+    Copy-Item -LiteralPath $src -Destination $dst -Force
+    Write-Host "DEPLOYED $rel"
+  }
+  $deployStarted = $true
+
+  foreach ($rel in $files) {
+    $src = Join-Path $source $rel
+    $dst = Join-Path $runtime $rel
+    $srcHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+    $dstHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dst).Hash
+    $row = [pscustomobject]@{ RelativePath = $rel; Match = ($srcHash -eq $dstHash); SourceHash = $srcHash; RuntimeHash = $dstHash }
+    $row | Format-List | Out-String | Write-Host
+    if ($srcHash -ne $dstHash) { throw "Hash mismatch after copy: $rel" }
+  }
+
+  $env:PYTHONIOENCODING = 'utf-8'
+  Write-Host 'RUN_RUNTIME_G2_G4'
+  python (Join-Path $runtime 'L5_SAFE\G2\g2_regression_runner.py') --section g4
+  if ($LASTEXITCODE -ne 0) { throw 'Runtime G2 g4 failed' }
+  Write-Host 'RUN_RUNTIME_G2_AUDIT'
+  python (Join-Path $runtime 'L5_SAFE\G2\g2_regression_runner.py') --section audit
+  if ($LASTEXITCODE -ne 0) { throw 'Runtime G2 audit failed' }
+  Write-Host 'RUN_RUNTIME_G2_ALL'
+  python (Join-Path $runtime 'L5_SAFE\G2\g2_regression_runner.py') --section all
+  if ($LASTEXITCODE -ne 0) { throw 'Runtime G2 all failed' }
+
+  Write-Host 'RUN_G4_AUDIT_SMOKE'
+  $eventJson = '{\"level\":\"INFO\",\"source\":\"G3\",\"reason\":\"task14b_audit_deployment_smoke\"}'
+  $smokeOutput = & python (Join-Path $runtime 'L5_SAFE\G4_MELTDOWN\g4_executor.py') --event-json $eventJson 2>&1
+  if ($LASTEXITCODE -ne 0) { throw "G4 audit smoke failed: $smokeOutput" }
+  Write-Host $smokeOutput
+  $smokeJson = $smokeOutput | ConvertFrom-Json
+  if ($smokeJson.audit_written -ne $true -or $smokeJson.dry_run -ne $true -or $smokeJson.writes_performed -ne $false) {
+    throw 'G4 audit smoke flags are invalid'
+  }
+
+  Write-Host 'RUN_G3_HASH_CHAIN_VERIFY'
+  $g3VerifyOutput = & python (Join-Path $runtime 'L5_SAFE\l5_audit_logger.py') 2>&1
+  if ($LASTEXITCODE -ne 0) { throw "G3 hash chain verifier returned non-zero: $g3VerifyOutput" }
+  Write-Host $g3VerifyOutput
+  if ($g3VerifyOutput -notmatch '通过') { throw "G3 hash chain verification did not report success: $g3VerifyOutput" }
+
+  $baselineDir = Split-Path $baselinePath
+  New-Item -ItemType Directory -Force -Path $baselineDir | Out-Null
+  $baselineFiles = foreach ($rel in $files) {
+    $dst = Join-Path $runtime $rel
+    $item = Get-Item -LiteralPath $dst
+    [pscustomobject]@{
+      relative_path = $rel
+      sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $dst).Hash
+      size = $item.Length
+      last_write_time = $item.LastWriteTimeUtc.ToString('o')
+    }
+  }
+  $baseline = [ordered]@{
+    generated_at = (Get-Date).ToUniversalTime().ToString('o')
+    generated_by = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    runtime_root = $runtime
+    task_id = 'Task 14B'
+    files = @($baselineFiles)
+    g2_g4_status = 'G2_REGRESSION_OK'
+    g2_audit_status = 'G2_REGRESSION_OK'
+    g2_all_status = 'G2_REGRESSION_OK'
+    g4_audit_smoke_status = 'audit_written:true,dry_run:true,writes_performed:false'
+    g3_hash_chain_status = 'VERIFY_OK'
+    notes = 'G4 dry-run audit persistence enabled; no real meltdown action enabled'
+  }
+  $baseline | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $baselinePath -Encoding UTF8
+  $createdBaseline = $true
+
+  $parsed = Get-Content -LiteralPath $baselinePath -Raw -Encoding UTF8 | ConvertFrom-Json
+  if ($parsed.task_id -ne 'Task 14B') { throw 'P2 14B delta baseline task_id mismatch' }
+  foreach ($file in $parsed.files) {
+    $dst = Join-Path $runtime $file.relative_path
+    if (-not (Test-Path -LiteralPath $dst -PathType Leaf)) { throw "Baseline target missing: $($file.relative_path)" }
+    $liveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dst).Hash
+    if ($liveHash -ne $file.sha256) { throw "Baseline hash mismatch: $($file.relative_path)" }
+  }
+
+  Write-Host 'TASK_14B_RUNTIME_DEPLOY_OK'
+  Write-Host 'P2_14B_DELTA_BASELINE_WRITTEN'
+  Write-Host "BASELINE_PATH=$baselinePath"
+  Write-Host 'READY_FOR_NEXT_P2_PLAN'
+}
+catch {
+  Write-Host "TASK_14B_RUNTIME_DEPLOY_BLOCKED: $($_.Exception.Message)"
+  if ($deployStarted) {
+    Write-Host 'ROLLBACK_START'
+    Restore-Task14BFiles
+    if ($createdBaseline -and (Test-Path -LiteralPath $baselinePath -PathType Leaf)) {
+      Remove-Item -LiteralPath $baselinePath -Force
+    }
+    Write-Host 'ROLLBACK_G2_ALL'
+    try { Invoke-RuntimeAllG2 } catch { Write-Host "ROLLBACK_G2_ALL_FAILED: $($_.Exception.Message)" }
+    Write-Host 'ROLLBACK_DONE'
+  }
+  throw
+}
+finally {
+  if ($transcriptStarted) {
+    Stop-Transcript | Out-Null
+    Write-Host "TRANSCRIPT_PATH=$transcriptPath"
+  }
+}
+Process ID: 37436
+PSVersion: 5.1.26100.7920
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.7920
+BuildVersion: 10.0.26100.7920
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+BACKUP_DIR=C:\L0_RUNTIME\L5_SAFE\DEPLOY_BACKUP\P2_14B_20260419_033428
+BACKED_UP L5_SAFE\l5_audit_logger.py
+DEPLOYED L5_SAFE\l5_audit_logger.py
+BACKED_UP L5_SAFE\G4_MELTDOWN\g4_executor.py
+DEPLOYED L5_SAFE\G4_MELTDOWN\g4_executor.py
+BACKED_UP L5_SAFE\G2\g2_regression_runner.py
+DEPLOYED L5_SAFE\G2\g2_regression_runner.py
+
+
+RelativePath : L5_SAFE\l5_audit_logger.py
+Match        : True
+SourceHash   : 99DC0BB7163C180D1FCA8A9096783AD82EFF1C5FF94F622D4889E981820E3DDA
+RuntimeHash  : 99DC0BB7163C180D1FCA8A9096783AD82EFF1C5FF94F622D4889E981820E3DDA
+
+
+RelativePath : L5_SAFE\G4_MELTDOWN\g4_executor.py
+Match        : True
+SourceHash   : BDA11332F95D1857AD7CE93EC66D53A819912FC4ADB2AA55571F1003F047B6F6
+RuntimeHash  : BDA11332F95D1857AD7CE93EC66D53A819912FC4ADB2AA55571F1003F047B6F6
+
+
+RelativePath : L5_SAFE\G2\g2_regression_runner.py
+Match        : True
+SourceHash   : F1886D7C9A772515C0F20D07DF2DA7F4A2A67CA6B9B23250808E7A8923D28C44
+RuntimeHash  : F1886D7C9A772515C0F20D07DF2DA7F4A2A67CA6B9B23250808E7A8923D28C44
+RUN_RUNTIME_G2_G4
+
+RUN_RUNTIME_G2_AUDIT
+
+RUN_RUNTIME_G2_ALL
+
+RUN_G4_AUDIT_SMOKE
+{"actions": [], "audit_written": true, "decision": "NO_ACTION", "dry_run": true, "level": "INFO", "ok": true, "reason": "task14b_audit_deployment_smoke", "source": "G3", "writes_performed": false}
+RUN_G3_HASH_CHAIN_VERIFY
+警告：第 6 条记录异常 — 哈希链断裂，疑似日志被篡改
+TASK_14B_RUNTIME_DEPLOY_BLOCKED: G3 hash chain verification did not report success: 警告：第 6 条记录异常 — 哈希链断裂，疑似日志被篡改
+ROLLBACK_START
+ROLLBACK_G2_ALL
+
+ROLLBACK_DONE
+**********************
+Windows PowerShell transcript end
+End time: 20260419033430
+**********************

@@ -1,0 +1,26 @@
+﻿
+
+FileSystemRights  : FullControl
+AccessControlType : Allow
+IdentityReference : LXLQL\SJ_Admin
+IsInherited       : False
+InheritanceFlags  : ContainerInherit, ObjectInherit
+PropagationFlags  : None
+
+FileSystemRights  : ReadData, AppendData, WriteExtendedAttributes, ExecuteFile, DeleteSubdirectoriesAndFiles, ReadAttri
+                    butes, Delete, ReadPermissions, ChangePermissions, TakeOwnership, Synchronize
+AccessControlType : Allow
+IdentityReference : LXLQL\SJ_Run
+IsInherited       : False
+InheritanceFlags  : ContainerInherit, ObjectInherit
+PropagationFlags  : None
+
+FileSystemRights  : CreateFiles, WriteAttributes, Synchronize
+AccessControlType : Allow
+IdentityReference : LXLQL\SJ_Run
+IsInherited       : False
+InheritanceFlags  : None
+PropagationFlags  : None
+
+
+

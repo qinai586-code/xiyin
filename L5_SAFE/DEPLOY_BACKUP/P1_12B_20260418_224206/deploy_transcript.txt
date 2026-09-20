@@ -1,0 +1,162 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260418224206
+Username: LXLQL\SJ_Admin
+RunAs User: LXLQL\SJ_Admin
+Configuration Name: 
+Machine: LXLQL (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -Command [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
+$ErrorActionPreference='Stop'
+$source = 'D:\qinai\L0_RUNTIME'
+$runtime = 'C:\L0_RUNTIME'
+$env:PYTHONIOENCODING = 'utf-8'
+if (-not (Test-Path -LiteralPath $source -PathType Container)) { throw "Source missing: $source" }
+if (-not (Test-Path -LiteralPath $runtime -PathType Container)) { throw "Runtime missing: $runtime" }
+$files = @(
+  'L2_CENTRAL\C4_OUTPUT_CHECK\c4_verify.py',
+  'L2_CENTRAL\C5_LLM_CALL\script\c5_persona_prompt.py'
+)
+Write-Output '=== DEFENDER_SCAN_SOURCE_FILES ==='
+foreach ($rel in $files) {
+  $src = Join-Path $source $rel
+  if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { throw "Missing source before scan: $src" }
+  Start-MpScan -ScanType CustomScan -ScanPath $src
+}
+$sourceThreats = @(Get-MpThreatDetection | Where-Object { $_.Resources -match [regex]::Escape($source) })
+if ($sourceThreats.Count -gt 0) {
+  $sourceThreats | Format-List
+  throw 'Threat detected under source runtime path; stopping Task 12B.'
+}
+Write-Output 'SOURCE_DEFENDER_SCAN_OK'
+
+$stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+$backup = Join-Path $runtime "L5_SAFE\DEPLOY_BACKUP\P1_12B_$stamp"
+New-Item -ItemType Directory -Force -Path $backup | Out-Null
+$transcriptPath = Join-Path $backup 'deploy_transcript.txt'
+Start-Transcript -Path $transcriptPath | Out-Null
+try {
+  Write-Output "BACKUP_DIR=$backup"
+  Write-Output '=== BEFORE_HASHES ==='
+  foreach ($rel in $files) {
+    $src = Join-Path $source $rel
+    $dst = Join-Path $runtime $rel
+    if (-not (Test-Path -LiteralPath $dst -PathType Leaf)) { throw "Missing runtime target before backup: $dst" }
+    [pscustomobject]@{
+      RelativePath = $rel
+      SourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+      RuntimeHashBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $dst).Hash
+    } | Format-List
+  }
+
+  Write-Output '=== BACKUP_AND_COPY ==='
+  foreach ($rel in $files) {
+    $src = Join-Path $source $rel
+    $dst = Join-Path $runtime $rel
+    $backupDst = Join-Path $backup $rel
+    New-Item -ItemType Directory -Force -Path (Split-Path $backupDst) | Out-Null
+    Copy-Item -LiteralPath $dst -Destination $backupDst -Force
+    Copy-Item -LiteralPath $src -Destination $dst -Force
+    Write-Output "COPIED::$rel"
+  }
+
+  Write-Output '=== AFTER_HASH_COMPARE ==='
+  $mismatches = @()
+  foreach ($rel in $files) {
+    $src = Join-Path $source $rel
+    $dst = Join-Path $runtime $rel
+    $srcHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+    $dstHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dst).Hash
+    $match = ($srcHash -eq $dstHash)
+    if (-not $match) { $mismatches += $rel }
+    [pscustomobject]@{
+      RelativePath = $rel
+      Match = $match
+      SourceHash = $srcHash
+      RuntimeHash = $dstHash
+    } | Format-List
+  }
+  if ($mismatches.Count -gt 0) { throw ('Hash mismatch after copy: ' + ($mismatches -join ', ')) }
+
+  Write-Output '=== RUNTIME_G2_C4 ==='
+  python C:\L0_RUNTIME\L5_SAFE\G2\g2_regression_runner.py --section c4
+  Write-Output '=== RUNTIME_G2_PERSONA ==='
+  python C:\L0_RUNTIME\L5_SAFE\G2\g2_regression_runner.py --section persona
+  Write-Output '=== RUNTIME_G2_ALL ==='
+  python C:\L0_RUNTIME\L5_SAFE\G2\g2_regression_runner.py --section all
+  Write-Output '=== RUNTIME_G2_SECURITY_CHECK ==='
+  python C:\L0_RUNTIME\L5_SAFE\G2\g2_regression_runner.py --section security_check
+  Write-Output '=== C7_ZERO_ENABLED ==='
+  python -c "import json, pathlib; p=pathlib.Path(r'C:\L0_RUNTIME\L2_CENTRAL\C7_PLUGINS\manifest.json'); m=json.loads(p.read_text(encoding='utf-8')); assert m.get('modules') == []; print('C7_ZERO_ENABLED_OK')"
+  Write-Output '=== L3_L4_AST ==='
+  python -c "import ast, pathlib; [ast.parse(p.read_text(encoding='utf-8')) for p in [pathlib.Path(r'C:\L0_RUNTIME\L3\l3_protocol_contract.py'), pathlib.Path(r'C:\L0_RUNTIME\L4\l4_gateway_contract.py')]]; print('L3_L4_AST_OK')"
+}
+finally {
+  Stop-Transcript | Out-Null
+  Write-Output "TRANSCRIPT_PATH=$transcriptPath"
+}
+Process ID: 18184
+PSVersion: 5.1.26100.7920
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.7920
+BuildVersion: 10.0.26100.7920
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+BACKUP_DIR=C:\L0_RUNTIME\L5_SAFE\DEPLOY_BACKUP\P1_12B_20260418_224206
+=== BEFORE_HASHES ===
+
+
+RelativePath      : L2_CENTRAL\C4_OUTPUT_CHECK\c4_verify.py
+SourceHash        : D94F9C01800745200F9CFEC5C6AD967EB5E79FC640B25B1CD7108B1C9F34C5AF
+RuntimeHashBefore : 2B495400E89DFB229B91C2578607241FC65D7F3F1F343C43846DA0B3AF362410
+
+
+
+
+
+RelativePath      : L2_CENTRAL\C5_LLM_CALL\script\c5_persona_prompt.py
+SourceHash        : EF782ACB3479E95E6D4FF6B09EE15D4170357A5FEC66221E320C9669079E04DA
+RuntimeHashBefore : E22DDD981523B8DECF1465D025FD2A2D6F221533C17E0CE239BFE4AE2822D6C3
+
+
+
+=== BACKUP_AND_COPY ===
+COPIED::L2_CENTRAL\C4_OUTPUT_CHECK\c4_verify.py
+COPIED::L2_CENTRAL\C5_LLM_CALL\script\c5_persona_prompt.py
+=== AFTER_HASH_COMPARE ===
+
+
+RelativePath : L2_CENTRAL\C4_OUTPUT_CHECK\c4_verify.py
+Match        : True
+SourceHash   : D94F9C01800745200F9CFEC5C6AD967EB5E79FC640B25B1CD7108B1C9F34C5AF
+RuntimeHash  : D94F9C01800745200F9CFEC5C6AD967EB5E79FC640B25B1CD7108B1C9F34C5AF
+
+
+
+
+
+RelativePath : L2_CENTRAL\C5_LLM_CALL\script\c5_persona_prompt.py
+Match        : True
+SourceHash   : EF782ACB3479E95E6D4FF6B09EE15D4170357A5FEC66221E320C9669079E04DA
+RuntimeHash  : EF782ACB3479E95E6D4FF6B09EE15D4170357A5FEC66221E320C9669079E04DA
+
+
+
+=== RUNTIME_G2_C4 ===
+
+=== RUNTIME_G2_PERSONA ===
+
+=== RUNTIME_G2_ALL ===
+
+=== RUNTIME_G2_SECURITY_CHECK ===
+
+=== C7_ZERO_ENABLED ===
+
+=== L3_L4_AST ===
+
+**********************
+Windows PowerShell transcript end
+End time: 20260418224206
+**********************

@@ -1,0 +1,128 @@
+﻿{
+    "generated_at":  "2026-04-18T23:55:01.0215568+08:00",
+    "generated_by":  "lxlql\\sj_admin",
+    "runtime_root":  "C:\\L0_RUNTIME",
+    "baseline_scope":  "P1_RUNTIME_17_FILES",
+    "external_backup_confirmed":  true,
+    "acl_hardening_confirmed":  true,
+    "files":  [
+                  {
+                      "relative_path":  "L5_SAFE\\ADMIN_TOOLS\\snapshot_tool.py",
+                      "sha256":  "3D46ECED63CF1F45E6B2D555D83C12D02AB7808A93A1DBAA9CE86957FB93737C",
+                      "size":  2720,
+                      "last_write_time":  "2026-04-17T21:02:59.6278048+08:00"
+                  },
+                  {
+                      "relative_path":  "L5_SAFE\\ADMIN_TOOLS\\rollback_tool.py",
+                      "sha256":  "323978C87AD24289827488D213C3104CF29BA40BD36E79176EB2AC2CC965E722",
+                      "size":  3858,
+                      "last_write_time":  "2026-04-17T21:02:59.6278048+08:00"
+                  },
+                  {
+                      "relative_path":  "L5_SAFE\\l5_audit_logger.py",
+                      "sha256":  "6BAE4530400F3871287501E71094622A1F425CDDC403C577F00F3E02F979CE73",
+                      "size":  5944,
+                      "last_write_time":  "2026-04-17T21:09:26.5884392+08:00"
+                  },
+                  {
+                      "relative_path":  "L2_CENTRAL\\C1_Auth\\c1_gatekeeper.py",
+                      "sha256":  "70616ED5CB776C2158E02425C11D39BBAAC117700CB28E5C9B7B032E653732C6",
+                      "size":  2303,
+                      "last_write_time":  "2026-04-18T00:30:26.3176214+08:00"
+                  },
+                  {
+                      "relative_path":  "L2_CENTRAL\\C4_OUTPUT_CHECK\\c4_persona_rule.txt",
+                      "sha256":  "18DE023B630F2A5CAF79D0E69BCCF2F36AD95EBBF47DC0E1399053AED9249CD3",
+                      "size":  2264,
+                      "last_write_time":  "2026-04-17T21:16:52.5720814+08:00"
+                  },
+                  {
+                      "relative_path":  "L2_CENTRAL\\C5_LLM_CALL\\script\\c5_llm_gatekeeper.py",
+                      "sha256":  "EF2781A75026F6011DC98AD128347492D2D43FCB3323F36EA5CF9CBE2A01D28A",
+                      "size":  3016,
+                      "last_write_time":  "2026-04-18T00:00:14.8050075+08:00"
+                  },
+                  {
+                      "relative_path":  "L2_CENTRAL\\C7_PLUGINS\\manifest.json",
+                      "sha256":  "681F797EFE2772A11AB539ECB1809AB0BEA4C8622B806273A803353C69616902",
+                      "size":  725,
+                      "last_write_time":  "2026-04-18T14:08:17.9762730+08:00"
+                  },
+                  {
+                      "relative_path":  "L5_SAFE\\ADMIN_TOOLS\\memory_review_tool.py",
+                      "sha256":  "F9162DD2441209303F5AE2A7B84899B17F96C074CD537B5CEC56C151CA0403ED",
+                      "size":  7972,
+                      "last_write_time":  "2026-04-18T14:41:17.7841924+08:00"
+                  },
+                  {
+                      "relative_path":  "L5_SAFE\\ADMIN_TOOLS\\review_cli.py",
+                      "sha256":  "8DC860F83A8A42574DD25B510DAA7BEC20626B0A56BCC53ADC6FD71CC6AE972B",
+                      "size":  4223,
+                      "last_write_time":  "2026-04-18T14:29:51.6166814+08:00"
+                  },
+                  {
+                      "relative_path":  "L5_SAFE\\G2\\g2_regression_runner.py",
+                      "sha256":  "45665C8CBB519E88A25A9A2318ED02F521A4E4D5006C716054F5B669124A6045",
+                      "size":  33735,
+                      "last_write_time":  "2026-04-18T21:49:13.9200728+08:00"
+                  },
+                  {
+                      "relative_path":  "L5_SAFE\\G4_MELTDOWN\\g4_executor.py",
+                      "sha256":  "F3FF7BCB7A1413959E931FCE637768AD5F2A7622FCCE567CE73DCFE1E9196C5C",
+                      "size":  6858,
+                      "last_write_time":  "2026-04-18T15:26:05.9934933+08:00"
+                  },
+                  {
+                      "relative_path":  "L3\\l3_protocol_contract.py",
+                      "sha256":  "54E8D2AFD8EF46C3BB47C996AC8C24E24A81E60BABA30AA2FDEEFEE3D5CC5FFF",
+                      "size":  1017,
+                      "last_write_time":  "2026-04-18T16:27:57.1934506+08:00"
+                  },
+                  {
+                      "relative_path":  "L4\\l4_gateway_contract.py",
+                      "sha256":  "CDD654288BB5E082F6DCC84C3AD4E75ECA3838BFF2B628D8B2D0E682BEFF65F6",
+                      "size":  1156,
+                      "last_write_time":  "2026-04-18T16:27:57.1934506+08:00"
+                  },
+                  {
+                      "relative_path":  "L2_CENTRAL\\L2_MAIN\\qinai_security_check.py",
+                      "sha256":  "28D834078FE41CFEEEB4D7281682E85A4F794CD3962166FD42FABF2BEC9A12FD",
+                      "size":  3843,
+                      "last_write_time":  "2026-04-18T21:48:07.3337785+08:00"
+                  },
+                  {
+                      "relative_path":  "L2_CENTRAL\\L2_MAIN\\utils_guard.py",
+                      "sha256":  "46EB7F1A05F24FA8BD8A04685CE8E539C2C0C8EDC08F52785B1F9378B77882B9",
+                      "size":  5376,
+                      "last_write_time":  "2026-04-14T01:16:15.0936838+08:00"
+                  },
+                  {
+                      "relative_path":  "L2_CENTRAL\\C4_OUTPUT_CHECK\\c4_verify.py",
+                      "sha256":  "D94F9C01800745200F9CFEC5C6AD967EB5E79FC640B25B1CD7108B1C9F34C5AF",
+                      "size":  1969,
+                      "last_write_time":  "2026-04-14T01:17:08.9155617+08:00"
+                  },
+                  {
+                      "relative_path":  "L2_CENTRAL\\C5_LLM_CALL\\script\\c5_persona_prompt.py",
+                      "sha256":  "EF782ACB3479E95E6D4FF6B09EE15D4170357A5FEC66221E320C9669079E04DA",
+                      "size":  8920,
+                      "last_write_time":  "2026-04-13T16:50:18.1299553+08:00"
+                  }
+              ],
+    "g2_status":  "G2_REGRESSION_OK",
+    "security_check_status":  "G2_REGRESSION_OK",
+    "c7_status":  "C7_ZERO_ENABLED_OK",
+    "l3_l4_status":  "L3_L4_AST_OK",
+    "g4_status":  {
+                      "ok":  true,
+                      "self_test":  "G4_SELF_TEST_OK",
+                      "dry_run":  true,
+                      "writes_performed":  false
+                  },
+    "notes":  [
+                  "Baseline is not a signature or FIM control.",
+                  "C7 remains zero-enabled; no real plugin is registered.",
+                  "G4 remains dry-run; real meltdown execution is not implemented.",
+                  "Full L3/L4, M0/B0/B1-B5/D1/D2/L1P/E3 remain pending owner adjudication."
+              ]
+}

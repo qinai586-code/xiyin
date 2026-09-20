@@ -1,0 +1,77 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260418224501
+Username: LXLQL\SJ_Admin
+RunAs User: LXLQL\SJ_Admin
+Configuration Name: 
+Machine: LXLQL (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -Command [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
+$ErrorActionPreference='Stop'
+$runtime = 'C:\L0_RUNTIME'
+$backup = 'C:\L0_RUNTIME\L5_SAFE\DEPLOY_BACKUP\P1_12B_20260418_224206'
+$files = @(
+  'L2_CENTRAL\C4_OUTPUT_CHECK\c4_verify.py',
+  'L2_CENTRAL\C5_LLM_CALL\script\c5_persona_prompt.py'
+)
+$rollbackTranscript = Join-Path $backup 'rollback_transcript.txt'
+Start-Transcript -Path $rollbackTranscript | Out-Null
+try {
+  Write-Output "ROLLBACK_BACKUP_DIR=$backup"
+  foreach ($rel in $files) {
+    $backupFile = Join-Path $backup $rel
+    $dst = Join-Path $runtime $rel
+    if (-not (Test-Path -LiteralPath $backupFile -PathType Leaf)) { throw "Backup missing: $backupFile" }
+    Copy-Item -LiteralPath $backupFile -Destination $dst -Force
+    Write-Output "RESTORED::$rel"
+    [pscustomobject]@{
+      RelativePath = $rel
+      RuntimeHashAfterRollback = (Get-FileHash -Algorithm SHA256 -LiteralPath $dst).Hash
+      BackupHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $backupFile).Hash
+      Match = ((Get-FileHash -Algorithm SHA256 -LiteralPath $dst).Hash -eq (Get-FileHash -Algorithm SHA256 -LiteralPath $backupFile).Hash)
+    } | Format-List
+  }
+  $env:PYTHONIOENCODING='utf-8'
+  Write-Output '=== RUNTIME_G2_ALL_AFTER_ROLLBACK ==='
+  python C:\L0_RUNTIME\L5_SAFE\G2\g2_regression_runner.py --section all
+}
+finally {
+  Stop-Transcript | Out-Null
+  Write-Output "ROLLBACK_TRANSCRIPT_PATH=$rollbackTranscript"
+}
+Process ID: 26168
+PSVersion: 5.1.26100.7920
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.7920
+BuildVersion: 10.0.26100.7920
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+ROLLBACK_BACKUP_DIR=C:\L0_RUNTIME\L5_SAFE\DEPLOY_BACKUP\P1_12B_20260418_224206
+RESTORED::L2_CENTRAL\C4_OUTPUT_CHECK\c4_verify.py
+
+
+RelativePath             : L2_CENTRAL\C4_OUTPUT_CHECK\c4_verify.py
+RuntimeHashAfterRollback : 2B495400E89DFB229B91C2578607241FC65D7F3F1F343C43846DA0B3AF362410
+BackupHash               : 2B495400E89DFB229B91C2578607241FC65D7F3F1F343C43846DA0B3AF362410
+Match                    : True
+
+
+
+RESTORED::L2_CENTRAL\C5_LLM_CALL\script\c5_persona_prompt.py
+
+
+RelativePath             : L2_CENTRAL\C5_LLM_CALL\script\c5_persona_prompt.py
+RuntimeHashAfterRollback : E22DDD981523B8DECF1465D025FD2A2D6F221533C17E0CE239BFE4AE2822D6C3
+BackupHash               : E22DDD981523B8DECF1465D025FD2A2D6F221533C17E0CE239BFE4AE2822D6C3
+Match                    : True
+
+
+
+=== RUNTIME_G2_ALL_AFTER_ROLLBACK ===
+
+**********************
+Windows PowerShell transcript end
+End time: 20260418224501
+**********************

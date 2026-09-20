@@ -53,6 +53,8 @@ $env:XIYIN_DATA_ROOT = $XiyinData
 
 `remember` / `--supersedes` 执行真正的长期记忆写入和纠错；聊天生成只是对话事件，不能凭“我记住了”就宣布保存。上下文投影保留来源与原话，隐藏内部 ID/状态码，不全局删除括号、文学描写或正常标点。没有用输出清洗冒充自然度改善。
 
+文字与语音共用输出前 `OutputGuard`：缓冲短段，检查正文内部标签、常见人设规则回显、内部标识和非创作场景动作旁白。命中报 `OutputBlocked`，停止本轮并清语音队列；正常括号、数学、表情和明确创作按场景保留。失败原文只留在诊断账本，不进入正常历史、睡眠摘录或数据候选；不自动重试、不替换成固定台词。规则覆盖、局部字面引用例外与未解决的语义问题见 [ARCHITECTURE.md](ARCHITECTURE.md#shared-output-gate)。
+
 ```powershell
 .\.venv\Scripts\python.exe .\xiyin.py remember '我喜欢解谜游戏' --kind preference
 .\.venv\Scripts\python.exe .\xiyin.py backup 'D:\XIYIN_Backups\new-backup'

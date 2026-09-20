@@ -23,6 +23,7 @@ from .config import Settings, load_settings
 from .experience import ExperienceStore
 from .lifecycle import RuntimeLease
 from .persona import load_persona
+from .output_guard import OutputGuard, OutputBlocked, VERSION as OUTPUT_GUARD_VERSION
 from .provider import LocalModelClient, ProviderCancelled, ProviderTruncated
 
 
@@ -136,25 +137,58 @@ class XIYINRuntime(RuntimeServices):
         self._active_task = asyncio.current_task()
         stop_watcher = asyncio.create_task(self.watch_stop(token))
         output = ""
+        raw_output = ""
+        guard = None
+        outcome = "cancelled"
+        provider_end = None
         terminal_recorded = False
         try:
             messages = self._messages(text.strip(), session_id, scope)
+            guard = OutputGuard(text.strip(), persona_prompt=messages[0]["content"])
             self.sleep_controller.wake("user input")
             evidence_id = self.store.append_event("user", text.strip(), session_id=session_id,
                                     scope=scope, origin="user_report", status="completed", request_id=request_id)
             self.self_state.observe("user_input", {"event_id": evidence_id}, session_id, scope)
             yield TurnEvent("start", request_id, session_id)
-            async with aclosing(self.provider.stream(messages, token)) as stream:
-                async for chunk in stream:
-                    # The output fence holds even if a backend yields a late token.
+            try:
+                async with aclosing(self.provider.stream(messages, token)) as stream:
+                    async for chunk in stream:
+                        # Fence both newly received and buffered text. Only checked
+                        # units may reach CLI, bridges, or the shared voice body.
+                        if token.is_set():
+                            raise ProviderCancelled("Turn cancelled")
+                        if not isinstance(chunk, str):
+                            raise ValueError("Provider returned non-text content")
+                        raw_output += chunk
+                        if len(raw_output) > 20000:
+                            raise OutputBlocked("output_buffer_limit")
+                        for segment in guard.feed(chunk):
+                            if token.is_set():
+                                raise ProviderCancelled("Turn cancelled")
+                            output += segment
+                            yield TurnEvent("text_delta", request_id, session_id, segment)
+            except (OutputBlocked, ProviderCancelled, asyncio.CancelledError, GeneratorExit):
+                raise
+            except Exception as exc:
+                provider_end = "length" if isinstance(exc, ProviderTruncated) else "error"
+                if token.is_set():
+                    raise ProviderCancelled("Turn cancelled") from exc
+                # A broken/truncated stream may still have a safe partial tail.
+                # Check it; never flush a pending tag simply because transport ended.
+                for segment in guard.finish():
                     if token.is_set():
                         raise ProviderCancelled("Turn cancelled")
-                    if not isinstance(chunk, str):
-                        raise ValueError("Provider returned non-text content")
-                    output += chunk
-                    if len(output) > 20000:
-                        raise ValueError("Model output exceeded the foundation text limit")
-                    yield TurnEvent("text_delta", request_id, session_id, chunk)
+                    output += segment
+                    yield TurnEvent("text_delta", request_id, session_id, segment)
+                raise
+            provider_end = "stop"
+            if token.is_set():
+                raise ProviderCancelled("Turn cancelled")
+            for segment in guard.finish():
+                if token.is_set():
+                    raise ProviderCancelled("Turn cancelled")
+                output += segment
+                yield TurnEvent("text_delta", request_id, session_id, segment)
             if token.is_set():
                 raise ProviderCancelled("Turn cancelled")
             if not output.strip():
@@ -162,8 +196,21 @@ class XIYINRuntime(RuntimeServices):
             self.store.append_event("assistant", output, session_id=session_id, scope=scope,
                                     origin="generated", status="completed", request_id=request_id)
             terminal_recorded = True
+            outcome = "completed"
             yield TurnEvent("complete", request_id, session_id)
+        except OutputBlocked as exc:
+            token.set()
+            outcome = "failed"
+            self.store.append_event("assistant", output, session_id=session_id, scope=scope,
+                                    origin="generated", status="failed", request_id=request_id)
+            terminal_recorded = True
+            # No rejected content in the terminal detail, spoken fallback, or
+            # completed assistant history. The original remains a diagnostic.
+            if guard is not None:
+                guard.blocked = exc.reason
+            yield TurnEvent("error", request_id, session_id, detail=f"OutputBlocked: {exc.reason}")
         except ProviderTruncated as exc:
+            outcome = "partial" if output else "failed"
             reply_id = self.store.append_event("assistant", output, session_id=session_id, scope=scope,
                                                 origin="generated", status="partial" if output else "failed",
                                                 request_id=request_id)
@@ -182,6 +229,7 @@ class XIYINRuntime(RuntimeServices):
             token.set()
             raise
         except Exception as exc:
+            outcome = "failed"
             self.store.append_event("assistant", output, session_id=session_id, scope=scope,
                                     origin="generated", status="failed", request_id=request_id)
             terminal_recorded = True
@@ -195,6 +243,21 @@ class XIYINRuntime(RuntimeServices):
                     if not terminal_recorded:
                         self.store.append_event("assistant", output, session_id=session_id, scope=scope,
                                                 origin="generated", status="cancelled", request_id=request_id)
+                    if guard is not None:
+                        self.store.append_event("output_guard", {
+                            "version": OUTPUT_GUARD_VERSION,
+                            "decision": "blocked" if guard.blocked else (
+                                "allowed_by_rules" if outcome == "completed" else "incomplete"),
+                            "reason": guard.blocked, "approved_chars": len(output),
+                            "received_chars": len(raw_output), "provider_end": provider_end,
+                            "semantic_truth_verified": False,
+                        }, session_id=session_id, scope=scope, origin="observation",
+                            status="recorded", request_id=request_id)
+                        if raw_output != output:
+                            self.store.append_event("generation_diagnostic", raw_output[:20000],
+                                                    session_id=session_id, scope=scope, origin="generated",
+                                                    status=outcome if outcome != "completed" else "failed",
+                                                    request_id=request_id)
                 finally:
                     self._active = None
                     self._active_task = None

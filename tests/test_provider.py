@@ -9,6 +9,7 @@ import httpx
 
 from xiyin_runtime.provider import (
     MAX_EVENT_BYTES, LocalModelClient, ProviderCancelled, ProviderConfig, ProviderError,
+    ProviderTruncated,
 )
 
 
@@ -269,7 +270,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(stream.closed)
 
     async def test_abnormal_finish_after_partial_output_is_not_completion(self):
-        for reason in ("length", "content_filter", "tool_calls", "function_call", "unknown_reason", 7):
+        for reason in ("content_filter", "tool_calls", "function_call", "unknown_reason", 7):
             with self.subTest(reason=reason):
                 stream = ByteStream([
                     event({"content": "partial"}), event({}, finish_reason=reason), DONE,
@@ -281,6 +282,109 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                         received.append(part)
                 self.assertEqual(received, ["partial"])
                 self.assertEqual(len(self.requests), 1)
+                self.assertTrue(stream.closed)
+
+    async def test_length_preserves_final_delta_and_has_distinct_incomplete_error(self):
+        for prefix, final, expected in (
+            ([event({"content": "first"})], "last", ["first", "last"]),
+            ([], "only", ["only"]),
+            ([event({"content": "first"})], None, ["first"]),
+            ([], "", []),
+            ([], None, []),
+        ):
+            with self.subTest(prefix=bool(prefix), final=final):
+                stream = ByteStream(prefix + [event({"content": final}, finish_reason="length"), DONE])
+                client = self.client_for(stream)
+                received = []
+                with self.assertRaisesRegex(ProviderTruncated, "finish_reason='length'"):
+                    async for part in client.stream(MESSAGES, asyncio.Event()):
+                        received.append(part)
+                self.assertEqual(received, expected)
+                self.assertEqual(len(self.requests), 1, "truncation must not trigger a replay")
+                self.assertTrue(stream.closed)
+
+    async def test_stop_preserves_final_delta_but_still_requires_done(self):
+        for ending in ([DONE], []):
+            with self.subTest(has_done=bool(ending)):
+                stream = ByteStream([event({"content": "last"}, finish_reason="stop")] + ending)
+                received = []
+
+                async def run():
+                    async for part in self.client_for(stream).stream(MESSAGES, asyncio.Event()):
+                        received.append(part)
+
+                if ending:
+                    await run()
+                else:
+                    with self.assertRaisesRegex(ProviderError, "before \\[DONE\\]"):
+                        await run()
+                self.assertEqual(received, ["last"])
+                self.assertTrue(stream.closed)
+
+    async def test_stop_rejects_subsequent_completion_deltas(self):
+        for extra in (
+            event({"content": "late"}),
+            event({"content": "late"}, finish_reason="length"),
+            event({}, finish_reason="stop"),
+        ):
+            with self.subTest(extra=extra):
+                stream = ByteStream([event({"content": "last"}, finish_reason="stop"), extra, DONE])
+                received = []
+                with self.assertRaisesRegex(ProviderError, "after finish_reason='stop'"):
+                    async for part in self.client_for(stream).stream(MESSAGES, asyncio.Event()):
+                        received.append(part)
+                self.assertEqual(received, ["last"])
+                self.assertTrue(stream.closed)
+
+    async def test_other_finish_errors_never_emit_same_event_content(self):
+        for reason in ("content_filter", "tool_calls", "function_call", "unknown_reason", 7):
+            with self.subTest(reason=reason):
+                stream = ByteStream([event({"content": "must not emit"}, finish_reason=reason), DONE])
+                received = []
+                with self.assertRaises(ProviderError) as caught:
+                    async for part in self.client_for(stream).stream(MESSAGES, asyncio.Event()):
+                        received.append(part)
+                self.assertNotIsInstance(caught.exception, ProviderTruncated)
+                self.assertEqual(received, [])
+                self.assertTrue(stream.closed)
+
+    async def test_length_does_not_hide_invalid_content(self):
+        stream = ByteStream([event({"content": ["invalid"]}, finish_reason="length"), DONE])
+        with self.assertRaisesRegex(ProviderError, "content must be") as caught:
+            await self.collect(self.client_for(stream))
+        self.assertNotIsInstance(caught.exception, ProviderTruncated)
+        self.assertTrue(stream.closed)
+
+    async def test_cancel_ready_with_length_drops_final_delta(self):
+        stream = ByteStream([
+            event({"content": "first"}),
+            event({"content": "late"}, finish_reason="length"), DONE,
+        ], block_at=1)
+        cancel, received = asyncio.Event(), []
+
+        async def run():
+            async for part in self.client_for(stream).stream(MESSAGES, cancel):
+                received.append(part)
+
+        task = asyncio.create_task(run())
+        await asyncio.wait_for(stream.waiting.wait(), 1)
+        cancel.set()
+        stream.release.set()
+        with self.assertRaises(ProviderCancelled):
+            await asyncio.wait_for(task, 1)
+        self.assertEqual(received, ["first"])
+        self.assertTrue(stream.closed)
+
+    async def test_cancel_after_final_delta_wins_over_finish_reason(self):
+        for reason in ("length", "stop"):
+            with self.subTest(reason=reason):
+                stream = ByteStream([event({"content": "last"}, finish_reason=reason), DONE])
+                cancel = asyncio.Event()
+                generator = self.client_for(stream).stream(MESSAGES, cancel)
+                self.assertEqual(await anext(generator), "last")
+                cancel.set()
+                with self.assertRaises(ProviderCancelled):
+                    await anext(generator)
                 self.assertTrue(stream.closed)
 
     async def test_null_finish_reason_does_not_require_a_final_stop_field(self):

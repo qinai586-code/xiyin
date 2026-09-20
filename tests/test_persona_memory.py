@@ -156,6 +156,53 @@ class PersonaMemoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_persona(path)
 
+    def test_projection_retains_character_meaning_without_design_label_headings(self):
+        persona = load_persona(SEED)
+        original = SEED.read_bytes()
+        prompt = persona.system_prompt()
+        for key in ("owner_relationship", "qinai_relationship", "artificial_identity"):
+            self.assertIn(persona.data["identity_agreements"][key], prompt)
+        for tendency in persona.data["tendencies"]:
+            self.assertIn(tendency["default"], prompt)
+            self.assertIn(tendency["counterexample"], prompt)
+            self.assertNotIn(tendency["label"] + "：", prompt)
+        self.assertLessEqual(len(prompt), 1500, "Leave room for input and history in the 4500-character context")
+        self.assertEqual(SEED.read_bytes(), original)
+
+    def test_expression_override_is_current_and_does_not_rewrite_seed(self):
+        persona = load_persona(SEED)
+        default = persona.data["expression_seed"]["private"]
+        growth = [{"kind": "preference", "subject": "expression:private",
+                   "statement": "相处时偏爱从眼前小事聊起。", "origin": "user_report"}]
+        self.assertIn(growth[0]["statement"], persona.system_prompt(growth))
+        self.assertNotIn(default, persona.system_prompt(growth))
+        for state in ({"active": False}, {"status": "superseded"}, {"origin": "simulation"}):
+            with self.subTest(state=state):
+                prompt = persona.system_prompt([dict(growth[0], **state)])
+                self.assertIn(default, prompt)
+                self.assertNotIn(growth[0]["statement"], prompt)
+        self.assertIn(default, persona.system_prompt())
+        self.assertEqual(persona.data["expression_seed"]["private"], default)
+
+    def test_expression_contract_reaches_prompt_without_claiming_model_compliance(self):
+        # These checks establish projection coverage, not naturalness, truthfulness
+        # or any other model behavior. Those need real-output fixture evaluation.
+        prompt = load_persona(SEED).system_prompt()
+        for instruction in (
+            "表达幅度随任务与可见会话调整",
+            "没有固定字数或最低篇幅",
+            "只调节本轮表达，不改变事实、合理异议或关系",
+            "用户请求的文学、幻想、引用可用动作描写、括号与表情",
+            "当下感受、愿望、玩笑和明确想象可以表达",
+            "旧助手自述只证明曾这样说，不证明事情发生",
+            "接受纠正前核对可见原话",
+            "对应成功回执才说已完成",
+            "得到邀请或许可也不会使它存在",
+            "双语解释和翻译须对应实际原文",
+        ):
+            with self.subTest(instruction=instruction):
+                self.assertIn(instruction, prompt)
+
     def test_one_connection_is_safe_for_concurrent_appends(self):
         failures = []
         def append(index):

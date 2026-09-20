@@ -26,6 +26,10 @@ class ProviderCancelled(ProviderError):
     """The caller revoked this output stream."""
 
 
+class ProviderTruncated(ProviderError):
+    """The output limit ended generation; previously yielded text is incomplete."""
+
+
 MAX_EVENT_BYTES = 64 * 1024
 MAX_HEALTH_BYTES = 64 * 1024
 _T = TypeVar("_T")
@@ -178,7 +182,7 @@ class _SSEDecoder:
                 raise ProviderError("unsupported SSE field")
 
 
-def _content(event: str, data: str) -> str | None:
+def _content(event: str, data: str) -> tuple[str | None, str | None] | None:
     if event != "message":
         raise ProviderError("provider returned an error or unsupported SSE event")
     try:
@@ -196,15 +200,16 @@ def _content(event: str, data: str) -> str | None:
     if type(choice.get("index", 0)) is not int or choice.get("index", 0) != 0 or not isinstance(choice.get("delta"), dict):
         raise ProviderError("invalid chat completion delta")
     finish_reason = choice.get("finish_reason")
-    if finish_reason is not None and finish_reason != "stop":
+    if finish_reason is not None:
         if not isinstance(finish_reason, str):
             raise ProviderError("invalid chat completion finish_reason")
-        raise ProviderError(f"chat did not complete normally: finish_reason={finish_reason[:80]!r}")
+        if finish_reason not in {"stop", "length"}:
+            raise ProviderError(f"chat did not complete normally: finish_reason={finish_reason[:80]!r}")
     content = choice["delta"].get("content")
     if content is not None and not isinstance(content, str):
         raise ProviderError("chat content must be a string or null")
     # Never forward reasoning, reasoning_content, tool_calls, or other fields.
-    return content
+    return content, finish_reason
 
 
 class LocalModelClient:
@@ -251,9 +256,10 @@ class LocalModelClient:
             raise ProviderError(f"local model health transport failed: {type(exc).__name__}") from exc
 
     async def stream(self, messages: list[dict], cancel: asyncio.Event) -> AsyncIterator[str]:
-        """Yield content deltas once; require SSE [DONE] and nonblank content.
+        """Yield deltas once; a successful completion needs [DONE] and content.
 
         timeout_seconds bounds the whole request, including waits between chunks.
+        A length limit yields its last content, then raises ProviderTruncated.
         Errors after partial output remain errors; callers must not silently retry.
         """
         if cancel.is_set():
@@ -280,7 +286,7 @@ class LocalModelClient:
                         raise ProviderError("chat response must be text/event-stream")
                     if response.headers.get("content-encoding", "identity").lower() != "identity":
                         raise ProviderError("compressed SSE is not supported")
-                    decoder, has_content = _SSEDecoder(), False
+                    decoder, has_content, stopped = _SSEDecoder(), False, False
                     iterator = response.aiter_bytes().__aiter__()
                     while True:
                         try:
@@ -294,10 +300,21 @@ class LocalModelClient:
                                 if not has_content:
                                     raise ProviderError("model returned no readable content")
                                 return
-                            content = _content(event, data)
+                            completion = _content(event, data)
+                            if completion is None:  # Optional usage-only event.
+                                continue
+                            if stopped:
+                                raise ProviderError("chat delta received after finish_reason='stop'")
+                            content, finish_reason = completion
+                            stopped = finish_reason == "stop"
                             if content:
                                 has_content = has_content or bool(content.strip())
                                 yield content
+                            # The consumer may revoke while handling the final delta.
+                            if cancel.is_set():
+                                raise ProviderCancelled("local model stream cancelled")
+                            if finish_reason == "length":
+                                raise ProviderTruncated("chat output truncated: finish_reason='length'")
                 finally:
                     await response.aclose()
         except httpx.HTTPError as exc:

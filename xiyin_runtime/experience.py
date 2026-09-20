@@ -122,16 +122,21 @@ class ExperienceStore:
             raise ValueError("content cannot contain NUL")
         if request_id is not None:
             request_id = _text(request_id, "request_id")
-        event_id = "event_" + uuid4().hex
         with self._lock:
             self._ensure_open()
             with self._db:
-                self._db.execute(
-                    "INSERT INTO events(id, created_at, session_id, scope, kind, content, origin, status, request_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (event_id, datetime.now(timezone.utc).isoformat(), session_id, scope, kind,
-                     serialized, origin, status, request_id),
-                )
+                event_id = self._insert_event(kind, serialized, session_id, scope, origin, status, request_id)
+        return event_id
+
+    def _insert_event(self, kind, content, session_id, scope, origin, status, request_id=None):
+        """Insert validated data inside the caller's lock and transaction."""
+        event_id = "event_" + uuid4().hex
+        self._db.execute(
+            "INSERT INTO events(id, created_at, session_id, scope, kind, content, origin, status, request_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (event_id, datetime.now(timezone.utc).isoformat(), session_id, scope, kind,
+             content, origin, status, request_id),
+        )
         return event_id
 
     def list_events(self, session_id: str, scope: str = "private") -> list[dict]:
@@ -165,14 +170,37 @@ class ExperienceStore:
                  "content": row["content"], "event_id": row["id"], "scope": row["scope"],
                  "origin": row["origin"], "status": row["status"]} for row in reversed(rows)]
 
+    def operation_receipts(self, session_id: str, scope: str = "private", limit: int = 2) -> list[dict]:
+        """Read existing memory-operation receipts, not statements about success.
+
+        These are ordinary ledger events; no migration or inferred historical
+        receipts are created for records written by earlier versions.
+        """
+        session_id, scope, limit = _text(session_id, "session_id"), _scope(scope), _limit(limit)
+        with self._lock:
+            self._ensure_open()
+            rows = self._db.execute(
+                "SELECT * FROM events WHERE session_id = ? AND scope = ? AND kind = 'memory_operation' "
+                "AND origin = 'tool_result' AND status IN ('verified_success', 'verified_failure') "
+                "ORDER BY seq DESC LIMIT ?", (session_id, scope, limit)).fetchall()
+        result = []
+        for row in reversed(rows):
+            item = dict(row)
+            item["content"] = json.loads(item["content"])
+            result.append(item)
+        return result
+
     def remember(self, statement: str, *, kind: str = "fact", subject: str = "owner",
-                 scope: str = "private", evidence_refs: list[str], supersedes: str | None = None) -> str:
+                 scope: str = "private", evidence_refs: list[str], supersedes: str | None = None,
+                 receipt_session_id: str | None = None) -> str:
         """Promote supported knowledge; corrections atomically retire the prior version.
 
         A source proves that a statement/observation occurred, not that arbitrary
         claims inside it are true. The caller decides what is justified by it.
         """
         statement, subject, scope = _text(statement, "statement"), _text(subject, "subject"), _scope(scope)
+        if receipt_session_id is not None:
+            receipt_session_id = _text(receipt_session_id, "receipt_session_id")
         if kind not in MEMORY_KINDS:
             raise ValueError("unsupported memory kind")
         if not isinstance(evidence_refs, list) or not evidence_refs:
@@ -207,7 +235,15 @@ class ExperienceStore:
                     INSERT INTO memories(id, created_at, kind, subject, scope, statement, origin, evidence_refs, supersedes)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (memory_id, datetime.now(timezone.utc).isoformat(), kind, subject, scope, statement,
-                      origin, json.dumps(refs), supersedes))
+                     origin, json.dumps(refs), supersedes))
+                if receipt_session_id is not None:
+                    # The receipt and memory commit together. An insertion error
+                    # cannot leave a changed memory paired with a failure receipt.
+                    receipt = {"operation": "replace" if supersedes else "remember", "success": True,
+                               "memory_id": memory_id, "statement": statement,
+                               "evidence_refs": refs, "supersedes": supersedes}
+                    self._insert_event("memory_operation", json.dumps(receipt, ensure_ascii=False),
+                                       receipt_session_id, scope, "tool_result", "verified_success")
         return memory_id
 
     @staticmethod

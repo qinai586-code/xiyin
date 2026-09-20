@@ -203,7 +203,7 @@ class ModelManifestTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Model verification failed", result.stdout + result.stderr)
                 used = json.loads(record.read_text(encoding="utf-8"))
-                self.assertEqual(Path(used["executable"]), Path(sys.executable))
+                self.assertTrue(Path(used["executable"]).samefile(sys.executable))
                 self.assertEqual(used["argv"], ["--check"])
                 record.unlink()
 
@@ -216,7 +216,9 @@ class ModelManifestTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("Model verification failed", result.stdout + result.stderr)
                     used = json.loads(record.read_text(encoding="utf-8"))
-                    self.assertEqual(Path(used["executable"]), expected)
+                    # Windows can expand TEMP's 8.3 alias in sys.executable.
+                    # Check file identity, not two spellings of the same path.
+                    self.assertTrue(Path(used["executable"]).samefile(expected))
                     self.assertEqual(used["argv"], ["--check"])
                     record.unlink()
 

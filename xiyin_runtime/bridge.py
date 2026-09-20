@@ -9,6 +9,7 @@ import threading
 from .runtime import FoundationRuntime
 
 _runtime = None
+_runner = None
 _lock = threading.Lock()
 _logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ def submit_to_chain_result(text: str, source: str = "sidecar") -> ChainResult:
         pass
     else:
         raise RuntimeError("Use FoundationRuntime.stream_turn from an async caller")
-    global _runtime
+    global _runtime, _runner
     with _lock:
         if _runtime is None:
             _runtime = FoundationRuntime.open()
@@ -76,4 +77,25 @@ def submit_to_chain_result(text: str, source: str = "sidecar") -> ChainResult:
             return ChainResult("".join(chunks), terminal.type if terminal else "error",
                                request_id, terminal.detail if terminal else "Stream ended without a terminal event")
 
-        return asyncio.run(run())
+        if _runner is None:
+            _runner = asyncio.Runner()
+        return _runner.run(run())
+
+
+def close_bridge():
+    """Drain the synchronous compatibility host and release its persistent loop."""
+    global _runtime, _runner
+    with _lock:
+        if _runtime is not None:
+            if _runner is not None:
+                _runner.run(_runtime.shutdown())
+            else:
+                _runtime.close()
+            _runtime = None
+        if _runner is not None:
+            _runner.close()
+            _runner = None
+
+
+import atexit
+atexit.register(close_bridge)

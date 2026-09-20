@@ -1,4 +1,4 @@
-name: Foundation
+name: XIYIN Runtime
 on:
   push:
     branches: [main]
@@ -22,10 +22,13 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.lock.txt
       - run: python -m pip install -r requirements.lock.txt
-      - name: Foundation unit and integration checks (no models or production data)
+      - name: XIYIN Runtime unit and integration checks (no models or production data)
         run: python -W error -m unittest discover -s tests -v
       - name: Compile active entry and runtime
-        run: python -m compileall -q xiyin.py xiyin_paths.py xiyin_identity.py xiyin_management.py xiyin_runtime L2_CENTRAL/C1_Auth L2_CENTRAL/L2_MAIN L5_SAFE/ADMIN_TOOLS tools tests
+        run: python -m compileall -q xiyin.py xiyin_paths.py xiyin_identity.py xiyin_management.py xiyin_runtime L2_CENTRAL/C1_Auth L2_CENTRAL/L2_MAIN tools tests
+      - name: Native Windows unified runtime acceptance (zero model requests)
+        if: runner.os == 'Windows'
+        run: python xiyin.py verify
       - name: Parse Windows launch scripts
         if: runner.os == 'Windows'
         shell: pwsh

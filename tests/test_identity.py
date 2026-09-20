@@ -98,11 +98,18 @@ class PolicyTests(unittest.TestCase):
                 identity.load_policy(self.root)
 
     def test_single_user_directories_must_be_portable_existing_and_contained(self):
-        for value in ("", ".", "..", "../outside", str(self.tmp), "C:/L0_RUNTIME", "C:relative",
+        for value in ("", "..", "../outside", str(self.tmp), "C:/L0_RUNTIME", "C:relative",
                       "//server/share", "L2_CENTRAL/../config", "L2_CENTRAL//child", "missing", "CON"):
             self.write_single(cwd=value)
             with self.subTest(value=value), self.assertRaises(identity.IdentityConfigError):
                 identity.load_policy(self.root)
+
+    def test_single_user_code_root_is_an_explicit_portable_cwd(self):
+        self.write_single(cwd=".")
+        policy = identity.load_policy(self.root)
+        identity.validate_runtime_cwd(policy, self.root)
+        with self.assertRaises(identity.IdentityConfigError):
+            identity.validate_runtime_cwd(policy, self.tmp)
 
     @staticmethod
     def link_directory(link, target):

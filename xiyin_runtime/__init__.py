@@ -1,3 +1,3 @@
-"""XIYIN Foundation: one local conversation and experience owner."""
+"""XIYIN: one runtime for state, conversation, action, sleep and growth."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

@@ -4,5 +4,5 @@
 mode = "single_user"
 
 [runtime]
-# Relative to this code root. tools/windows.ps1 enters this directory.
-allowed_cwd_roots = ["L2_CENTRAL"]
+# Relative to this code root. The launcher uses this root, with no fixed drive/account.
+allowed_cwd_roots = ["."]

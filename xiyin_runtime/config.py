@@ -15,6 +15,7 @@ class Settings:
     max_input_chars: int = 2000
     max_context_chars: int = 4500
     history_messages: int = 8
+    idle_sleep_seconds: int = 300
 
 
 def load_settings() -> Settings:
@@ -33,6 +34,9 @@ def load_settings() -> Settings:
         values[name] = value
     if values["max_context_chars"] <= values["max_input_chars"]:
         raise ValueError("Context budget must leave space for character and history")
+    idle_sleep = config.get("autonomy", {}).get("idle_sleep_seconds", 300)
+    if type(idle_sleep) is not int or not 0 <= idle_sleep <= 86400:
+        raise ValueError("autonomy.idle_sleep_seconds must be 0..86400")
     return Settings(
         provider=ProviderConfig(
             endpoint=inference["endpoint"],
@@ -42,5 +46,6 @@ def load_settings() -> Settings:
             enable_thinking=inference.get("enable_thinking", False),
         ),
         persona_path=xiyin_paths.resolve_path("character_seed"),
+        idle_sleep_seconds=idle_sleep,
         **values,
     )

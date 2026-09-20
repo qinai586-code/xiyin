@@ -14,7 +14,6 @@ max_input_chars = 2000
 max_context_chars = 4500
 history_messages = 8
 
-[machine]
-# Legacy supervisor only; Foundation does not infer health from this directory.
-# Machine value is retained and is not used as the new runtime data root.
-heartbeat_dir = "C:\\Users\\SJ_Run\\AppData\\Local\\Temp\\qinai_launcher_runtime_state"
+[autonomy]
+# Foreground input preempts bounded jobs. No model-driven activity is auto-enabled.
+idle_sleep_seconds = 300

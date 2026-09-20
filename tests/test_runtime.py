@@ -203,7 +203,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime = self.runtime(provider)
         memory_id = runtime.remember("紫色星图是我保存的纪念品", session_id="old")
         await self.collect(runtime, "紫色星图", session_id="new")
-        self.assertIn(memory_id, str(provider.calls[-1]))
+        self.assertNotIn(memory_id, str(provider.calls[-1]))
         self.assertIn("紫色星图是我保存的纪念品", str(provider.calls[-1]))
         self.assertEqual([m["role"] for m in provider.calls[-1]], ["system", "user"])
 
@@ -258,7 +258,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.calls, [])
 
     def test_production_open_is_exclusive_and_close_releases_data_root(self):
+        (self.path.parent / ".xiyin_data").write_text("xiyin-data-root v1\nid=lease-test\n", encoding="utf-8")
         with (
+            patch("xiyin_runtime.runtime.xiyin_paths.data_root_id", return_value="lease-test"),
             patch("xiyin_runtime.runtime.authorize_runtime", return_value=None),
             patch("xiyin_runtime.runtime.load_settings", return_value=self.settings),
             patch("xiyin_runtime.runtime.xiyin_paths.data_root", return_value=self.path.parent),

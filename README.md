@@ -1,121 +1,81 @@
-# XIYIN Foundation A
+# XIYIN — Living Runtime
 
-栖音第一步底座：一个本地模型入口、可成长的人物种子、一套持续经历与记忆，以及可取消的文字流。当前实现对应 Architecture v1.1 §16 的 **A 阶段**；语音身体、真实自然打断、电脑/游戏操作、睡眠调度与 Lab 仍属于后续 B–D。
+栖音现在使用统一运行核心：人物与状态、经历记忆、目标调度、身体动作、语音打断、睡眠、成长和维护共用同一套运行接口。完整对应关系见 [ARCHITECTURE.md](ARCHITECTURE.md)，上游使用范围见 [OPEN_SOURCE.md](OPEN_SOURCE.md)。
 
-## 当前行为
+这次重构交付的是**可进行无模型整体验收的代码**。真实模型自然度、麦克风/扬声器延迟、游戏技能和训练收益仍需实机验证。未配置的身体后端会报告不可用。
 
-- `xiyin.py` 是统一命令入口，旧 `L2_CENTRAL/L2_MAIN/l2_central.py` 的 `submit_to_chain(text, source)` 接到同一核心。旧入口的人工逐字延迟、祈奈回退提示和待审队列不参与新链路。
-- `xiyin_paths.py` 以自身定位代码；数据使用 `XIYIN_DATA_ROOT` 或 `config/paths.toml`，要求 `.xiyin_data` 标记。启动不会自动创建空记忆，显式 `init-data` 才初始化。
-- `config/persona/character.seed.json` 来自主理人的 v0.2 人物稿。栖止、纹路追踪、轻微不服气、选择性偏爱是初始倾向，成长可以覆盖相应字段。
-- 人物投影按当前问题、会话和本轮明确要求调节表达长短，避免主动表演动作或朗读设计标签；保留合理异议、感受、想象和按需展开。没有统一字数限制、正文删改或固定替换台词，也不把一次“简短些”保存为永久性格。此处是上下文指导，尚不能证明模型已自然遵循。
-- `xiyin_runtime/provider.py` 调用本机 OpenAI-compatible SSE 接口。仅交付正文，过滤 reasoning/tool 数据；请求等待和读取都可取消，不重试已输出内容。关闭 HTTP 流不证明服务端 GPU 计算已结束。
-- `experience.sqlite3` 保存原始事件、完成/中断状态和有证据的记忆版本。普通记录不走人工待审；明确纠错可替代旧条目；模拟和模型自述不能充当实际技能证据。
-- 私密与公开上下文隔离，会话历史按 session 隔离；首版按单一主理人设计，多参与者共享会话尚未开放。中文检索为词面/双字匹配，尚非向量语义检索。
-- 同一数据根只允许一个前台 Runtime 持有 OS 文件锁。退出/崩溃释放锁；不靠残留 PID 文件猜存活。
+## Windows: first run without a model
 
-这里的 complete 表示完整生成了文字，不表示音频播放、人已听见或动作执行成功。第一步没有连接音频或设备，模型上下文也明确这一能力范围。
-
-## Windows 上启动
-
-要求 Python 3.12。默认 `config/deployment.toml` 使用 `single_user`：从当前 Windows 账户直接运行，无需 `runas`、管理员终端、`SJ_Run` 密码或预先登记固定 SID。仍通过 Windows API 读取实际进程令牌，不接受用户名、环境变量或模型输出代替身份检查。`tools/windows.ps1` 自动切换到自身源码的 `L2_CENTRAL`；默认允许目录由源码根定位，移动独立副本不需要改成固定盘符路径。
-
-单账户下的管理确认属于**应用层操作确认，不是操作系统账户隔离**。同一账户可运行和维护代码；模型、提示词、Python 虚拟环境与 `XIYIN_DATA_ROOT` 都不能授予管理权限。显式保留旧双账户配置时，仍按 `separate_accounts` 检查运行／审核 SID，不能用新默认模式解释为旧白名单已经失效。
-
-保留的 `L5_SAFE/ADMIN_TOOLS` 旧记忆维护入口也接受当前账户。审核移动、快照创建和恢复会在 Windows 控制台显示本次动作、目标路径与随机确认文本，输入匹配后执行并记录审计；不接受管道输入、环境变量或 `--yes` 自动批准。恢复及其保护性快照共确认一次。它们维护旧文件记忆，不是 Foundation SQLite 的备份或纠错入口；普通文字对话和显式 `remember` 无需这些确认。同账户程序仍能修改代码或操控界面，因此这里没有声称防住同账户恶意程序。
-
-1. 安装隔离依赖（不以管理员权限运行模型）：
-
-   ```powershell
-   .\tools\windows.ps1 -Mode setup
-   .\tools\windows.ps1 -Mode doctor
-   ```
-
-   doctor 默认不联网、不写数据；报告实际配置模式及身份检查结果。未初始化、身份检查失败或未探测模型时 `ready_for_text_runtime=false`，退出码 2 是未就绪，不是通过。它不创建 Runtime 会话，也不通过试写来验证 ACL；即使配置、标记、身份与模型探针均通过，也不能替代真实会话和数据写入验收。
-
-2. 在当前账户下初始化数据。新空数据根用：
-
-   ```powershell
-   .\tools\windows.ps1 -Mode init-data
-   ```
-
-   如果已有 `L1_MEMORY` 内容，先备份，再显式使用 `-AdoptExisting`。此操作只登记该数据根，不把旧 `passed/wait_check` 自动导入栖音的新事实库。已存在有效标记则复用，绝不生成新身份覆盖它。外部 `XIYIN_DATA_ROOT` 必须预先存在；运行时不自动迁移数据。
-
-   仅测试时，在**新独立源码副本**中操作，使用当前账户可访问的新临时数据目录。例如：
-
-   ```powershell
-   $XiyinTestData = Join-Path $env:TEMP ('XIYIN_ACCOUNT_TEST_' + [guid]::NewGuid().ToString('N'))
-   New-Item -ItemType Directory -Path $XiyinTestData -ErrorAction Stop | Out-Null
-   $env:XIYIN_DATA_ROOT = $XiyinTestData
-   .\tools\windows.ps1 -Mode init-data
-   .\tools\windows.ps1 -Mode doctor
-   ```
-
-   后续 `chat` 使用同一终端中的该数据根；不要对原仓库执行 `reset`、清理、覆盖或 `-AdoptExisting` 来准备测试。测试结束后保留证据；关闭终端即可结束这个环境变量的会话作用域。如果复制后的源码、模型或数据仍受旧 NTFS ACL 限制，入口会报出实际拒绝访问；不要自动提权、夺取所有权或批量重写 ACL，应先确认当前账户有权使用的副本和目录。
-
-3. 下载固定版本的一个模型文件：
-
-   ```powershell
-   .\.venv\Scripts\python.exe .\tools\download_model.py
-   ```
-
-   `config/model.toml` 固定 Hugging Face revision、真实文件名、大小和 SHA-256。约 3.01 GB；下载前可查看清单，`--check` 只检查本地文件。没有下载多套模型或视觉 projector。
-
-4. 准备兼容 Qwen3.5 的 [llama.cpp Windows server](https://github.com/ggml-org/llama.cpp/releases)，在另一个终端启动：
-
-   ```powershell
-   .\tools\start_model.ps1 -ServerPath 'C:\Tools\llama.cpp\llama-server.exe'
-   ```
-
-   脚本默认使用项目 `.venv\Scripts\python.exe`；如需其他 Python 3.12，可显式传 `-PythonPath`。缺少解释器时会提示先运行 setup。
-
-   CPU 是明确的默认；确认后端支持且显存允许时再传 `-GpuLayers`。脚本只绑定 `127.0.0.1:8080`，模型 alias 为 `xiyin`，单前台槽、4K 上下文。不自动选择 CUDA、不调用云模型。研究源码 pin 不是已实测的 Windows 二进制版本；实际 server 版本和 GPU offload 必须记录在实机验证中。
-
-5. 验证真实推理，再开始文字会话：
-
-   ```powershell
-   .\tools\windows.ps1 -Mode doctor -ProbeModel
-   .\tools\windows.ps1 -Mode chat
-   ```
-
-   输入 `/quit` 退出；生成时 Ctrl+C 取消当前回复，再次 Ctrl+C 可退出。网络/模型失败显示系统错误，不用人物台词冒充成功。探针分别记录 `/health` 与真实文本生成，不把 HTTP 200 当成 GPU 已工作。
-
-## 记忆和成长接口
-
-在允许的 `L2_CENTRAL` 工作目录下，可用绝对路径调用 `xiyin.py`。例如从源码根明确记下一项由主理人提供的偏好：
+Python 3.12，当前普通 Windows 账户即可；不需要 `runas`、SJ_Run 密码、管理员权限或固定 C 盘路径。虚拟环境应在这台机器重建，不复制另一台电脑的 Python/venv。
 
 ```powershell
-Push-Location .\L2_CENTRAL
-try {
-    & '..\.venv\Scripts\python.exe' '..\xiyin.py' remember '我喜欢解谜游戏' --kind preference --subject owner
-} finally { Pop-Location }
-```
-
-命令输出记忆 ID。纠正同一 kind/subject/scope 的条目可加 `--supersedes <旧ID>`；保存的是有来源的用户陈述，不宣称独立核实。底层 `ExperienceStore.remember()` 使用已有事件引用，替代与新版本在一个事务中提交。`kind=goal` 可保存续做事项，自动目标调度尚未实现。
-
-Runtime 的显式记忆操作会记录成功或失败回执；成功回执与记忆版本在同一事务提交，失败不覆盖旧版本。近期同会话、同 scope 的回执和检索来源可进入模型上下文，旧版本记录不会被补造回执。普通聊天保存对话事件，不会自动调用长期记忆保存或更正；模型说“已经记住”不代表该操作发生。历史保留 user/assistant 角色，既往助手自述也不作为实际经历的证明。
-
-人物投影读取有效的 `persona/preference/opinion/relationship` 记忆；如 `subject=tendency:gentle_defiance` 可为该倾向提供有经历支持的新描述。重载 seed 不会覆写这些记录。A 阶段提供存储与投影，不宣称已经实现自动人格反思或自我训练。
-
-异步调用使用 `FoundationRuntime.stream_turn()`；事件包含 request/session ID、start、text_delta、complete、cancelled 或 error。提前退出必须 `aclose()`，推荐 `contextlib.aclosing`；取消后旧请求不能恢复输出。同步兼容入口仅支持已映射来源，默认 sidecar 被隔离为公开的独立会话；其他来源应显式实现 scope/session 适配，不能以来源字符串冒充主理人。
-
-达到服务端输出上限（`finish_reason=length`）时，客户端先交付末段正文，再报告 `ProviderTruncated`；Runtime 发出已有的 error 事件，保存原始部分正文及关联的 `generation_end` 终止原因，不将其混入已完成回复历史。CLI 保留已显示正文并另行报错，不自动续写或重试。模型输出上限和请求超时默认值未改变，它们不是自适应表达策略。
-
-需要同步取得部分正文和终态的调用方使用 `xiyin_runtime.bridge.submit_to_chain_result()`，返回 `ChainResult(text, status, request_id, detail)`；只有 `status == "complete"` 才是完成。旧 `submit_to_chain()` 仍按兼容约定在非完成时返回空字符串，并记录不含回复正文的警告；需要显示部分正文的界面应迁移到详细入口。
-
-关闭 Runtime 前先等流结束或关闭流；进行中的 `close()` 会请求取消并抛出 `RuntimeBusy`，保留数据库与进程锁，等中断记录保存后再关闭。
-
-## 验证与边界
-
-```powershell
+.\tools\windows.ps1 -Mode setup
 .\tools\windows.ps1 -Mode test
+.\tools\windows.ps1 -Mode verify
 ```
 
-测试覆盖路径与标记、Windows junction、人物成长优先、中文召回、来源和范围隔离、流取消竞态、重启连续性与失败恢复。GitHub Actions 在 Windows/Ubuntu 跑相同离线测试，并解析 PowerShell。夹具和模拟 HTTP 响应不是模型/音频实测，CI 不下载权重、不修改账户、不启动旧 G4 执行器。
+`verify` 从正式 `XIYINRuntime.open(model_enabled=False)` 进入，读取真实 Windows token，在全新临时目录执行记忆纠错、目标→文件操作→验证、策略采用/回退、睡眠唤醒、停止恢复、SQLite 备份恢复及重启连续性。结束删除自身临时测试目录；输出结果 JSON。**0 次模型请求，不触碰原人物数据，不点击真实窗口。** 失败返回非零退出码，不能用组件测试代替报告整体通过。
 
-Windows 专属启动检查使用 CI 自身的真实进程令牌和默认单账户配置，打开实际 `FoundationRuntime`，在临时数据根写记忆并重启读取，另验证 C1 的绝对路径入口。它不发模型请求。管理测试使用合成文件树和明确的令牌／控制台替身，不等于已在主理人的 Windows 机器验收交互确认或 NTFS 权限。
+`test` 是无模型自动测试，包括合成 ASR/TTS/播放、HTTP 和桌面 API 替身；它们明确标注为测试输入，不能解释为真实模型/设备能力。
 
-新增组合回归串联真实 SSE 客户端代码、Runtime、临时 SQLite、CLI/同步适配，使用模拟传输和明确的测试授权替身；检查末段截断、取消与恢复、回执原子性和上下文来源，不评价生成文本是否自然。`tests/fixtures/expression_cases.json` 提供 18 个尚未执行的 Windows 行为复测候选，包括同题正常/简短/详细表达、纠错、经历与记忆事实、能力和双语对应；没有标准回复模板。它不是启动模型批测的授权。后续实测须记录提交、模型和服务端参数、实际输入与逐字输出、终止原因及耗时，并区分组件探测与已授权 Runtime 验收；SID 或入口未就绪时不能报告整体通过。
+## Keep one runtime running
 
-旧 `L5_SAFE/BASELINE`、`DEPLOY_BACKUP`、规则与评测资料保留原状；其中 QINAI 的人格或阶段冻结断言不代表 Foundation A 的验收标准。原 C2–C6 文件和管理工具是 legacy 路径，当前统一入口不调用它们；不要混用旧 `wait_check` 与新 SQLite 为两份权威。
+使用新数据根测试常驻服务：
 
-采用前保留现有部署文件和数据备份。若需要撤回代码，可回到此前 Git 提交；不要删除 `.xiyin_data` 或覆盖 SQLite 来“回滚人格”。本次修改的是应用的账户选择与管理确认方式，不创建／删除 Windows 账户，不改变 NTFS ACL，不迁移旧记忆或数据库。依赖使用 `requirements.lock.txt` 固定；模型和参考录音/形象素材各自保留来源信息。
+```powershell
+$XiyinData = Join-Path $env:TEMP ('XIYIN_DATA_' + [guid]::NewGuid().ToString('N'))
+$XiyinWork = Join-Path $env:TEMP ('XIYIN_WORK_' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory $XiyinData,$XiyinWork | Out-Null
+$env:XIYIN_DATA_ROOT = $XiyinData
+.\tools\windows.ps1 -Mode init-data
+.\.venv\Scripts\python.exe .\xiyin.py serve --no-model --workspace $XiyinWork
+```
+
+`serve` 接受本地 JSON-lines，保持一个事件循环。逐行输入，下一个指令不必等待前一个模型请求结束；stop 会优先处理。它没有开放网络端口。
+
+```json
+{"kind":"remember","payload":{"text":"我喜欢解谜游戏","kind":"preference"}}
+{"kind":"plan","payload":{"objective":{"skill":"write_text","path":"note.txt","text":"栖音的第一条真实任务"}}}
+{"kind":"status"}
+{"kind":"sleep"}
+{"kind":"wake"}
+{"kind":"stop"}
+{"kind":"resume"}
+```
+
+已排队目标会自行执行并保存操作回执，不需要每一步再发命令。当前规则 planner 只实例化已知读写技能；开放自然语言规划可通过 Director 的 planner 接口替换，不能以无模型验收声称已经拥有通用自主规划。空闲默认 300 秒整理入睡，可在 `config/runtime.toml` 设置；用户输入唤醒。未知外部动作不会盲目重试。
+
+在另一个终端设置同一个 `XIYIN_DATA_ROOT` 后可运行 `xiyin.py stop` / `resume`。它们只操作独立停止标记，不抢正在运行的 SQLite lease；活跃生成和身体动作各自监视该标记。进程彻底挂死时仍需 OS/设备侧停止方式，不能把 Python watcher 宣称为独立硬件急停。
+
+## Character and memory
+
+`config/persona/character.seed.json` 保留主理人 v0.2 人物稿来源。种子是成长起点；当前有效人物记忆可覆盖倾向和私下/公开表达，不固定每轮台词或字数。`feedback` 可记录明确反馈，`grow` 根据同会话真实反馈提出并默认采用低风险人物字段，`rollback_growth` 恢复先前投影。稳定身份与权限不通过角色文本改写。
+
+`remember` / `--supersedes` 执行真正的长期记忆写入和纠错；聊天生成只是对话事件，不能凭“我记住了”就宣布保存。上下文投影保留来源与原话，隐藏内部 ID/状态码，不全局删除括号、文学描写或正常标点。没有用输出清洗冒充自然度改善。
+
+```powershell
+.\.venv\Scripts\python.exe .\xiyin.py remember '我喜欢解谜游戏' --kind preference
+.\.venv\Scripts\python.exe .\xiyin.py backup 'D:\XIYIN_Backups\new-backup'
+# 关闭使用同一数据根的 Runtime 后：
+.\.venv\Scripts\python.exe .\xiyin.py restore 'D:\XIYIN_Backups\new-backup'
+```
+
+备份父目录须已存在、目标须为新目录。恢复校验数据根身份/校验和并在真实控制台确认一次；普通记忆、成长和已授权范围内的任务不需要多轮审核。旧文件记忆不自动导入，已有 `.xiyin_data` 和 `experience.sqlite3` 不会被重置。
+
+## Body and voice
+
+- 文件身体：显式 workspace 范围，真实写后读回验证，拒绝链接/越界；活动学习策略实际约束读写预算。
+- Windows 桌面：`serve --window <HWND>` 显式绑定窗口；`--capture` 启用可选 Pillow 截图。失焦/停止/超时释放本系统持有的键；动作需独立可观察后置条件才能成功。未做现场设备验收。
+- 游戏：`TypedGameAdapter` 接注册动作 schema 与真实 transport。接收到 action/result 不等于通关或动作完成；需要关联动作和新状态回执。
+- 语音：主机调用 `runtime.attach_speech(SpeechController(asr=...,tts=...,sink=...))`，再向返回的 voice session 输入 PCM。输入和输出并行，确认打断取消同一 Runtime 的生成、TTS 和播放；旧 epoch 不再输出。ASR/TTS/实际播放/AEC 后端仍需安装配置，本轮没有偷偷下载模型。
+- Avatar、直播平台等通过 Body 接口接入，尚无已配置实例；不会创建另一个角色作者或记忆库。
+
+本地模型沿用固定 `config/model.toml`。需要真实对话时再使用 `tools/download_model.py`、`tools/start_model.ps1`，然后 `tools/windows.ps1 -Mode doctor -ProbeModel` / `-Mode chat`；这些命令会下载或调用模型，**不属于本轮无模型任务**。doctor 默认只读、未探测模型时退出码 2 表示尚未确认文字运行就绪。
+
+## Upgrade and verification boundary
+
+Lab 的策略检查、采用、实际执行变化和回退已经接通；Supervisor 的代码/模型清单登记只是选定候选，明确返回 `manifest_selection_only`，不声称已自动重启换版或训练了模型。数据导出为本地未审阅候选，默认不具备训练资格，不上传给 QINAI 或云服务。
+
+CI 在 Ubuntu/Windows 跑无模型测试，Windows 另跑上述正式入口 `verify`。自然打断的声学 p95、噪声/回声、显存与自然对话长短适应必须单独实测。
+
+旧 QINAI 代码与历史资料保存在 `legacy/qinai/`，已退出正式链路；原有部署备份未删除。源代码回退可用 Git 旧提交，数据库回退用对应有效备份；不要删除仓库或人物标记来“修复”。DeepSeek 应使用合并后的完整独立副本，重建 venv，原样执行 test/verify，报告真实失败，不更改人设、架构、账户、ACL 或断言来凑通过。

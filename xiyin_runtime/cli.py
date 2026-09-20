@@ -130,8 +130,18 @@ async def _display_turn(runtime, text, args):
     return result
 
 
+async def _run_owned(runtime, operation):
+    try:
+        return await operation
+    finally:
+        if hasattr(runtime, "shutdown"):
+            await runtime.shutdown()
+        else:
+            runtime.close()
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="xiyin", description="XIYIN Foundation A: local text and persistent experience")
+    parser = argparse.ArgumentParser(prog="xiyin", description="XIYIN: runtime, body, memory, sleep, learning and maintenance")
     commands = parser.add_subparsers(dest="command", required=True)
     diag = commands.add_parser("doctor", help="Read-only diagnostics; model generation only with --probe-model")
     diag.add_argument("--probe-model", action="store_true")
@@ -147,6 +157,21 @@ def main(argv=None):
             sub.add_argument("--kind", choices=("fact", "preference", "opinion", "relationship", "goal", "persona"), default="fact")
             sub.add_argument("--subject", default="owner")
             sub.add_argument("--supersedes")
+    service = commands.add_parser("serve", help="Authorized local JSON-lines service; one persistent event loop")
+    service.add_argument("--workspace", type=Path, help="Explicit existing directory granted to the file body")
+    service.add_argument("--window", type=int, help="Explicit native HWND granted to the desktop body")
+    service.add_argument("--capture", action="store_true", help="Enable optional Pillow screenshots for that window")
+    service.add_argument("--no-model", action="store_true", help="Disable inference, preserve all domain operations")
+    commands.add_parser("verify", help="Temporary native-host acceptance without any model or live device calls")
+    for name in ("status", "stop", "resume", "sleep", "wake", "tick"):
+        commands.add_parser(name)
+    operation = commands.add_parser("dispatch", help="Owner console operation as one JSON object")
+    operation.add_argument("event", help="JSON InputEvent")
+    operation.add_argument("--workspace", type=Path)
+    backup = commands.add_parser("backup", help="Consistent backup of the actual experience database")
+    backup.add_argument("directory", type=Path)
+    restore = commands.add_parser("restore", help="Restore a validated backup with an exclusive stopped-runtime lease")
+    restore.add_argument("directory", type=Path)
     args = parser.parse_args(argv)
     try:
         if args.command == "doctor":
@@ -156,22 +181,72 @@ def main(argv=None):
         if args.command == "init-data":
             print(json.dumps(initialize_data(adopt_existing=args.adopt_existing), ensure_ascii=False))
             return 0
-        runtime = FoundationRuntime.open()
+        if args.command == "verify":
+            from .acceptance import verify_native
+            print(json.dumps(asyncio.run(verify_native()), ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "restore":
+            from .supervisor import restore_backup
+            from xiyin_management import runtime_restore_action
+            root = xiyin_paths.data_root()
+            with runtime_restore_action(xiyin_paths.project_root(), root, xiyin_paths.data_root_id(), args.directory) as confirmed:
+                result = restore_backup(confirmed["backup_dir"], confirmed["data_root"], confirmed["data_root_id"])
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+        if args.command in {"stop", "resume"}:
+            # A separate owner console can set/clear the stop marker even while
+            # the main service owns the database lease. No SQLite is opened here.
+            from .supervisor import set_stop_marker
+            authorize_runtime()
+            result = set_stop_marker(xiyin_paths.data_root(), xiyin_paths.data_root_id(),
+                                     stopped=args.command == "stop")
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+        model_enabled = args.command in {"ask", "chat"} or (args.command == "serve" and not args.no_model)
+        runtime = FoundationRuntime.open() if model_enabled else FoundationRuntime.open(model_enabled=False)
         try:
+            from .contracts import InputEvent
+            if args.command == "serve":
+                from .service import serve
+                if args.workspace:
+                    runtime.register_workspace(args.workspace)
+                if args.capture and not args.window:
+                    raise ValueError("--capture requires an explicit --window HWND")
+                if args.window:
+                    from .body.windows import win32_desktop_adapter
+                    runtime.body.register(win32_desktop_adapter(args.window, capture=args.capture))
+                return asyncio.run(_run_owned(runtime, serve(runtime)))
+            if args.command in {"status", "sleep", "wake", "tick", "backup", "dispatch"}:
+                if args.command == "dispatch":
+                    if args.workspace:
+                        runtime.register_workspace(args.workspace)
+                    event = InputEvent.from_local_console(json.loads(args.event))
+                else:
+                    event = InputEvent(args.command, {"directory": str(args.directory)} if args.command == "backup" else {})
+                result = asyncio.run(_run_owned(runtime, runtime.dispatch(event)))
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                return 0
             if args.command == "remember":
                 print(runtime.remember(args.text, kind=args.kind, subject=args.subject,
                                        session_id=args.session, scope=args.scope, supersedes=args.supersedes))
                 return 0
             if args.command == "ask":
-                return asyncio.run(_display_turn(runtime, args.text, args))
-            print("栖音文字会话。输入 /quit 退出；生成时 Ctrl+C 取消当前回复。")
-            while True:
-                text = input("主理人：").strip()
-                if text == "/quit":
-                    return 0
-                if text:
-                    print("栖音：", end="", flush=True)
-                    asyncio.run(_display_turn(runtime, text, args))
+                return asyncio.run(_run_owned(runtime, _display_turn(runtime, args.text, args)))
+            async def chat_loop():
+                print("栖音文字会话。/quit 退出；/remember 内容 保存；/sleep 休息；/wake 唤醒；Ctrl+C 取消回复。")
+                while True:
+                    text = (await asyncio.to_thread(input, "主理人：")).strip()
+                    if text == "/quit":
+                        return 0
+                    if text.startswith("/remember "):
+                        print("系统：", runtime.remember(text[len("/remember "):], session_id=args.session, scope=args.scope))
+                    elif text in {"/sleep", "/wake", "/status"}:
+                        result = await runtime.dispatch(InputEvent(text[1:], session_id=args.session, scope=args.scope))
+                        print("系统：", json.dumps(result, ensure_ascii=False))
+                    elif text:
+                        print("栖音：", end="", flush=True)
+                        await _display_turn(runtime, text, args)
+            return asyncio.run(_run_owned(runtime, chat_loop()))
         finally:
             runtime.close()
     except (KeyboardInterrupt, EOFError):

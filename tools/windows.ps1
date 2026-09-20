@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('setup','doctor','init-data','chat','test')]
+    [ValidateSet('setup','doctor','init-data','chat','serve','verify','test')]
     [string]$Mode = 'doctor',
     [switch]$ProbeModel,
     [switch]$AdoptExisting
@@ -17,7 +17,7 @@ if ($Mode -eq 'setup') {
     exit 0
 }
 if (!(Test-Path -LiteralPath $Python -PathType Leaf)) { throw 'Run tools/windows.ps1 -Mode setup first.' }
-Push-Location (Join-Path $Root 'L2_CENTRAL')
+Push-Location $Root
 try {
     if ($Mode -eq 'test') {
         & $Python -W error -m unittest discover -s (Join-Path $Root 'tests') -t $Root -v

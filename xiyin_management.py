@@ -1,4 +1,4 @@
-"""Explicit console confirmation for legacy memory management operations.
+"""Explicit console confirmation for current restore and legacy management.
 
 This is an application confirmation boundary, not Windows account isolation.
 Code running as the same user can modify Python, files, or inject GUI input;
@@ -101,7 +101,12 @@ def _targets(root, targets):
 
 
 def _append_audit(root, record):
-    path = Path(_safe_path(root, root / "L5_SAFE/review_audit/management_actions.jsonl"))
+    # Compatibility receipts must not recreate the retired QINAI L5 tree.
+    path = Path(_safe_path(root, root / "run/management_actions.jsonl"))
+    _persist_audit(path, record)
+
+
+def _persist_audit(path, record):
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8", newline="\n") as stream:
@@ -237,3 +242,73 @@ def management_action(root, action, targets, *, operator=None, detail=None):
             audit("SUCCEEDED", data_may_have_changed=True)
         finally:
             _ACTIVE.pop(lease, None)
+
+
+@contextmanager
+def runtime_restore_action(code_root, data_root, data_root_id, backup_dir):
+    """Confirm one modern restore, including external marked data directories.
+
+    This confirms a scope for the trusted CLI, not a caller-provided permission
+    flag. The actual restore separately requires the stopped runtime's exclusive
+    lease and checks the database again. No model, environment value or supplied
+    operator text can replace the real process identity and console answer.
+    """
+    from xiyin_runtime.supervisor import _identity as data_identity, _plain, validate_backup
+
+    code_root = _root(code_root)
+    actor = verified_operator(code_root)
+    root = data_identity(data_root, data_root_id)
+    backup = _plain(backup_dir)
+    scope = {"backup_dir": str(backup), "data_root": str(root)}
+    details = {"data_root_id": data_root_id,
+               "operation": "Replace experience.sqlite3; keep the existing data identity and a rollback database"}
+    request = {"schema_version": "xiyin.management.v1", "request_id": uuid.uuid4().hex,
+               "root": str(code_root), "action": "RUNTIME_RESTORE", "targets": scope,
+               "operator": actor, "detail": details}
+
+    def audit(status, **extra):
+        # Revalidate the root for every write; never redirect a receipt to a
+        # replaced identity or a link, and never recreate a missing data marker.
+        data_identity(root, data_root_id)
+        path = Path(_safe_path(root, root / "management_actions.jsonl"))
+        _persist_audit(path, {**request, "status": status,
+                            "time": datetime.now(timezone.utc).isoformat(), **extra})
+
+    with _LOCK:
+        audit("REQUESTED", data_may_have_changed=False)
+        try:
+            manifest = validate_backup(backup, data_root_id)
+        except BaseException as exc:
+            audit("PREFLIGHT_FAILED", error_type=type(exc).__name__, data_may_have_changed=False)
+            raise
+        details["backup_sha256"] = manifest["sha256"]
+        challenge = f"CONFIRM RUNTIME_RESTORE {secrets.token_hex(4)}"
+        prompt = ("\nXIYIN management request (one operation):\n"
+                  + json.dumps({"action": "RUNTIME_RESTORE", "targets": scope, "detail": details},
+                               ensure_ascii=True, indent=2)
+                  + "\nOnly confirm if you intend these changes. Other input cancels.\n"
+                  + challenge + "\n> ")
+        try:
+            if _console_answer(prompt) != challenge:
+                raise ManagementCancelled("Runtime restore was not confirmed")
+        except BaseException as exc:
+            audit("CANCELLED" if isinstance(exc, (ManagementCancelled, KeyboardInterrupt)) else "CONFIRMATION_FAILED",
+                  error_type=type(exc).__name__, data_may_have_changed=False)
+            raise
+        # A backup altered while the user reads the prompt needs a new request.
+        try:
+            data_identity(root, data_root_id)
+            if validate_backup(backup, data_root_id) != manifest:
+                raise ValueError("Backup changed during restore confirmation")
+        except BaseException as exc:
+            audit("PREFLIGHT_FAILED", error_type=type(exc).__name__, data_may_have_changed=False)
+            raise
+        audit("CONFIRMED", data_may_have_changed=False)
+        try:
+            yield {"backup_dir": backup, "data_root": root, "data_root_id": data_root_id}
+        except BaseException as exc:
+            audit("CANCELLED" if isinstance(exc, KeyboardInterrupt) else "FAILED",
+                  error_type=type(exc).__name__, data_may_have_changed=True)
+            raise
+        else:
+            audit("SUCCEEDED", data_may_have_changed=True)

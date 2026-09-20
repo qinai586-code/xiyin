@@ -11,6 +11,7 @@ import json
 import re
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -24,6 +25,46 @@ ORIGINS = frozenset({"observation", "user_report", "user_statement", "owner_stat
 MEMORY_KINDS = frozenset({"fact", "preference", "opinion", "relationship", "persona", "strategy", "skill", "goal"})
 INCOMPLETE = frozenset({"generated", "partial", "cancelled", "failed", "unknown"})
 NON_EVIDENCE = frozenset({"generated", "reflection", "inference", "simulation", "design_seed"})
+DOCUMENT_COLLECTIONS = frozenset({"state", "jobs", "goals", "candidates", "releases", "checkpoints"})
+
+
+class DocumentConflict(RuntimeError):
+    """The requested document version no longer owns this update."""
+
+
+class DocumentCorruptionError(RuntimeError):
+    """A persisted document cannot be safely interpreted; never reset it silently."""
+
+
+def _document_key(collection, key):
+    if collection not in DOCUMENT_COLLECTIONS:
+        raise ValueError("unsupported document collection")
+    key = _text(key, "document key")
+    if len(key) > 240 or any(ord(char) < 32 for char in key):
+        raise ValueError("invalid document key")
+    return key
+
+
+def _json_object(value):
+    if not isinstance(value, dict):
+        raise ValueError("document value must be a JSON object")
+    # Refuse lossy key conversion, nonfinite numbers and non-JSON objects.
+    def check(item):
+        if isinstance(item, dict):
+            if any(not isinstance(key, str) for key in item):
+                raise ValueError("JSON object keys must be strings")
+            for child in item.values():
+                check(child)
+        elif isinstance(item, list):
+            for child in item:
+                check(child)
+        elif item is not None and not isinstance(item, (str, int, float, bool)):
+            raise ValueError("document contains a non-JSON value")
+    try:
+        check(value)
+        return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ValueError(f"invalid document JSON: {exc}") from exc
 
 
 def _text(value: str, field: str) -> str:
@@ -85,6 +126,14 @@ class ExperienceStore:
                 CREATE INDEX IF NOT EXISTS memories_scope_active ON memories(scope, active, seq);
                 CREATE UNIQUE INDEX IF NOT EXISTS memories_one_successor ON memories(supersedes)
                     WHERE supersedes IS NOT NULL;
+                CREATE TABLE IF NOT EXISTS documents (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    collection TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK(version > 0),
+                    value TEXT NOT NULL,
+                    UNIQUE(collection, key)
+                );
             """)
 
     def __enter__(self) -> "ExperienceStore":
@@ -103,6 +152,90 @@ class ExperienceStore:
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("experience store is closed")
+
+    @contextmanager
+    def document_transaction(self):
+        """Short atomic document operations, serialized across SQLite connections.
+
+        Nested document writes use savepoints. Do not perform model calls or
+        existing legacy ``with connection`` writers inside this transaction.
+        """
+        with self._lock:
+            self._ensure_open()
+            nested = self._db.in_transaction
+            savepoint = "document_" + uuid4().hex
+            self._db.execute("SAVEPOINT " + savepoint if nested else "BEGIN IMMEDIATE")
+            try:
+                yield
+                if nested:
+                    self._db.execute("RELEASE " + savepoint)
+                else:
+                    self._db.commit()
+            except BaseException:
+                if nested:
+                    self._db.execute("ROLLBACK TO " + savepoint)
+                    self._db.execute("RELEASE " + savepoint)
+                else:
+                    self._db.rollback()
+                raise
+
+    @staticmethod
+    def _document_envelope(row):
+        def pairs(items):
+            result = {}
+            for key, value in items:
+                if key in result:
+                    raise ValueError("duplicate JSON key")
+                result[key] = value
+            return result
+        def invalid_constant(value):
+            raise ValueError("nonfinite JSON number")
+        try:
+            value = json.loads(row["value"], object_pairs_hook=pairs, parse_constant=invalid_constant)
+            if not isinstance(value, dict) or type(row["version"]) is not int or row["version"] < 1:
+                raise ValueError("invalid document object or version")
+            _json_object(value)
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise DocumentCorruptionError(f"Cannot read {row['collection']}/{row['key']}: {exc}") from exc
+        return {"key": row["key"], "version": row["version"], "value": value}
+
+    def read_document(self, collection: str, key: str) -> dict | None:
+        key = _document_key(collection, key)
+        with self._lock:
+            self._ensure_open()
+            row = self._db.execute("SELECT * FROM documents WHERE collection=? AND key=?", (collection, key)).fetchone()
+            return self._document_envelope(row) if row is not None else None
+
+    def list_documents(self, collection: str) -> list[dict]:
+        _document_key(collection, "validate")
+        with self._lock:
+            self._ensure_open()
+            return [self._document_envelope(row) for row in self._db.execute(
+                "SELECT * FROM documents WHERE collection=? ORDER BY seq", (collection,))]
+
+    def write_document(self, collection: str, key: str, value: dict,
+                       expected_version: int | None = None) -> dict:
+        """Write JSON and its ledger receipt atomically; 0 means create-only.
+
+        None is an unconditional update, not permission to reset corrupt data.
+        Callers deriving state from a read must supply its observed version.
+        """
+        key = _document_key(collection, key)
+        if expected_version is not None and (type(expected_version) is not int or expected_version < 0):
+            raise ValueError("expected_version must be a nonnegative integer or None")
+        serialized = _json_object(value)
+        with self.document_transaction():
+            prior = self.read_document(collection, key)
+            current = prior["version"] if prior else 0
+            if expected_version is not None and expected_version != current:
+                raise DocumentConflict(f"{collection}/{key}: expected {expected_version}, found {current}")
+            version = current + 1
+            self._db.execute("INSERT INTO documents(collection,key,version,value) VALUES (?,?,?,?) "
+                             "ON CONFLICT(collection,key) DO UPDATE SET version=excluded.version,value=excluded.value",
+                             (collection, key, version, serialized))
+            self._insert_event("document_updated", json.dumps({"collection": collection, "key": key, "version": version}),
+                               "system", _scope(value.get("scope", "private")), "tool_result", "verified_success")
+            return {"key": key, "version": version, "value": json.loads(serialized)}
 
     def append_event(self, kind: str, content: str | dict, *, session_id: str,
                      scope: str = "private", origin: str = "observation",
@@ -209,7 +342,7 @@ class ExperienceStore:
         memory_id = "memory_" + uuid4().hex
         with self._lock:
             self._ensure_open()
-            with self._db:
+            with self.document_transaction():
                 origins = []
                 for ref in refs:
                     source = self._db.execute("SELECT * FROM events WHERE id = ?", (ref,)).fetchone()
@@ -245,6 +378,26 @@ class ExperienceStore:
                     self._insert_event("memory_operation", json.dumps(receipt, ensure_ascii=False),
                                        receipt_session_id, scope, "tool_result", "verified_success")
         return memory_id
+
+    def retract_memory(self, memory_id: str, *, receipt_session_id: str) -> dict:
+        """Retire an active projection without deleting its history or evidence.
+
+        This is used for explicit growth rollback to a design seed. A retired
+        memory is never represented as a new lived experience or reactivated.
+        """
+        memory_id = _text(memory_id, "memory_id")
+        session_id = _text(receipt_session_id, "receipt_session_id")
+        with self.document_transaction():
+            prior = self._db.execute("SELECT * FROM memories WHERE id=?", (memory_id,)).fetchone()
+            if prior is None or not prior["active"]:
+                raise ValueError("Only an active memory may be retracted")
+            self._db.execute("UPDATE memories SET active=0 WHERE id=? AND active=1", (memory_id,))
+            receipt = {"operation": "retract", "success": True, "memory_id": memory_id,
+                       "statement": prior["statement"], "evidence_refs": json.loads(prior["evidence_refs"]),
+                       "supersedes": None}
+            self._insert_event("memory_operation", json.dumps(receipt, ensure_ascii=False),
+                               session_id, prior["scope"], "tool_result", "verified_success")
+            return receipt
 
     @staticmethod
     def _memory_dict(row: sqlite3.Row) -> dict:

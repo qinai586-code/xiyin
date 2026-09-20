@@ -289,9 +289,9 @@ def load_policy(root: Path | str) -> dict:
         if mode == "single_user":
             # Same portable component rules as config/paths.toml; no drive,
             # expansion, traversal, empty components, or Windows device names.
-            p = _portable_runtime_path(root, entry)
+            p = root if entry == "." else _portable_runtime_path(root, entry)
             raw = root
-            for part in entry.split("/"):
+            for part in ([] if entry == "." else entry.split("/")):
                 raw /= part
                 if _is_reparse(raw):
                     raise IdentityConfigError(f"Runtime directory contains a link: {raw}")

@@ -78,7 +78,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         first = self.runtime(FakeProvider(("今天", "一起看星星。")))
         events = await self.collect(first, "今晚做什么？", session_id="evening")
         self.assertEqual([event.type for event in events],
-                         ["start", "text_delta", "text_delta", "complete"])
+                         ["start", "text_delta", "complete"])
         self.assertEqual(len({event.request_id for event in events}), 1)
         first.close()
 
@@ -97,12 +97,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(reply["origin"] == "generated" for reply in replies))
 
     async def test_cancel_fences_late_provider_text_and_records_only_partial(self):
-        provider = FakeProvider(("已经输出", "迟到内容不得出现"))
+        provider = FakeProvider(("已经输出。", "迟到内容不得出现"))
         runtime = self.runtime(provider)
         stream = runtime.stream_turn("开始")
         start = await anext(stream)
         first = await anext(stream)
-        self.assertEqual(first.text, "已经输出")
+        self.assertEqual(first.text, "已经输出。")
         self.assertFalse(runtime.cancel("another-request"))
         self.assertTrue(runtime.cancel(start.request_id))
         rest = [event async for event in stream]
@@ -111,18 +111,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         replies = self.assistant_events()
         self.assertEqual(len(replies), 1)
         self.assertEqual(replies[0]["status"], "cancelled")
-        self.assertEqual(replies[0]["content"], "已经输出")
+        self.assertEqual(replies[0]["content"], "已经输出。")
         self.assertEqual(replies[0]["request_id"], start.request_id)
         self.assertFalse(any(row["role"] == "assistant"
                              for row in self.store.history("owner")))
         self.assertFalse(runtime.cancel())
 
     async def test_consumer_aclose_records_partial_and_releases_provider(self):
-        provider = FakeProvider(("可见前缀", "后续内容"))
+        provider = FakeProvider(("可见前缀。", "后续内容"))
         runtime = self.runtime(provider)
         stream = runtime.stream_turn("开始")
         await anext(stream)
-        self.assertEqual((await anext(stream)).text, "可见前缀")
+        self.assertEqual((await anext(stream)).text, "可见前缀。")
         await stream.aclose()
 
         self.assertTrue(provider.closed.is_set(), "aclose must release the provider immediately")
@@ -131,7 +131,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         replies = self.assistant_events()
         self.assertEqual(len(replies), 1)
         self.assertIn(replies[0]["status"], {"partial", "cancelled"})
-        self.assertEqual(replies[0]["content"], "可见前缀")
+        self.assertEqual(replies[0]["content"], "可见前缀。")
         self.assertFalse(any(row["role"] == "assistant"
                              for row in self.store.history("owner")))
         resumed = await self.collect(runtime, "继续下一轮")
@@ -155,7 +155,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.collect(runtime, "重试"))[-1].type, "complete")
 
     async def test_close_during_turn_preserves_store_until_cancellation_is_saved(self):
-        runtime = self.runtime(FakeProvider(("已经输出", "未输出")))
+        runtime = self.runtime(FakeProvider(("已经输出。", "未输出")))
         stream = runtime.stream_turn("开始")
         await anext(stream)
         await anext(stream)
@@ -165,7 +165,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         replies = self.assistant_events()
         self.assertEqual(len(replies), 1)
         self.assertEqual(replies[0]["status"], "cancelled")
-        self.assertEqual(replies[0]["content"], "已经输出")
+        self.assertEqual(replies[0]["content"], "已经输出。")
         runtime.close()
 
     async def test_empty_provider_output_is_not_a_completed_turn(self):

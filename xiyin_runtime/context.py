@@ -47,7 +47,7 @@ def retrieved_record(item: dict) -> dict[str, str] | None:
     """Keep source meaning; never echo a serialized internal event object."""
     # These have dedicated projection or are generation diagnostics. In
     # particular, search() may return the same operation receipt as raw JSON.
-    if item.get("kind") in {"memory_operation", "generation_end"}:
+    if item.get("kind") in {"memory_operation", "generation_end", "generation_diagnostic", "output_guard"}:
         return None
     content = item.get("content")
     if not isinstance(content, str) or not content.strip():

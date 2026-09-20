@@ -84,8 +84,8 @@ class RuntimeVoiceSession:
                     elif event.type == "text_delta":
                         chunks.append(event.text)
                         pending += event.text
-                        # Transport segmentation preserves every character;
-                        # it does not filter brackets or rewrite personality.
+                        # Runtime has already checked these units. Body only
+                        # segments approved text for transport and playback.
                         while pending:
                             boundary = re.search(r"[。！？!?\n]", pending)
                             length = boundary.end() if boundary else (80 if len(pending) >= 80 else 0)
@@ -98,6 +98,11 @@ class RuntimeVoiceSession:
                                 break
                     elif event.type in {"complete", "cancelled", "error"}:
                         terminal, detail = event.type, event.detail
+                        if event.type == "error" and event.detail.startswith("OutputBlocked:"):
+                            pending = ""
+                            # Revoke the epoch and purge even previously approved
+                            # queued audio; no stale tail may outlive a rejection.
+                            await self.controller.cancel()
                 if terminal == "complete" and pending and self.controller.active_epoch == epoch:
                     await speak(pending)
             self._last_result = {"text": "".join(chunks), "generation_status": terminal, "detail": detail,

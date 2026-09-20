@@ -79,7 +79,7 @@ class StreamOutcomeTests(unittest.TestCase):
         runtime, requests, authorization = self.make_runtime(wire)
         events = asyncio.run(self.collect(runtime))
         self.assertEqual([item.type for item in events],
-                         ["start", "text_delta", "text_delta", "complete"])
+                         ["start", "text_delta", "complete"])
         self.assertEqual("".join(item.text for item in events), "first last")
         reply = self.reply_record(runtime, events[0].request_id)
         self.assertEqual((reply["content"], reply["status"]), ("first last", "completed"))
@@ -95,7 +95,7 @@ class StreamOutcomeTests(unittest.TestCase):
         runtime, requests, _ = self.make_runtime(wire)
         events = asyncio.run(self.collect(runtime))
         self.assertEqual([item.type for item in events],
-                         ["start", "text_delta", "text_delta", "error"])
+                         ["start", "text_delta", "error"])
         self.assertEqual("".join(item.text for item in events), "first last")
         self.assertIn("ProviderTruncated", events[-1].detail)
         self.assertIn("finish_reason='length'", events[-1].detail)
@@ -149,7 +149,7 @@ class StreamOutcomeTests(unittest.TestCase):
     def test_cancel_before_and_after_first_text_allows_next_real_client_turn(self):
         for before_first in (True, False):
             with self.subTest(before_first=before_first):
-                chunks = ([] if before_first else [event({"content": "visible"})])
+                chunks = ([] if before_first else [event({"content": "visible。"})])
                 wire = ByteStream(chunks + [event({"content": "late"}, finish_reason="length"), DONE],
                                   block_at=len(chunks))
                 recovery = ByteStream([event({"content": "recovered"}, finish_reason="stop"), DONE])
@@ -170,7 +170,7 @@ class StreamOutcomeTests(unittest.TestCase):
 
                 recovered = asyncio.run(run())
                 self.assertEqual(events[-1].type, "cancelled")
-                visible = "" if before_first else "visible"
+                visible = "" if before_first else "visible。"
                 self.assertEqual("".join(item.text for item in events), visible)
                 reply = self.reply_record(runtime, events[0].request_id)
                 self.assertEqual((reply["content"], reply["status"]), (visible, "cancelled"))

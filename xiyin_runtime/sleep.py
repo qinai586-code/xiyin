@@ -8,6 +8,21 @@ import threading
 PHASES = {"awake", "settling", "consolidating", "sleeping", "waking"}
 
 
+def _complete_utterance(record):
+    """A failed/blocked generation is a diagnostic, not a finished utterance.
+
+    Accept both ledger rows and previously saved excerpt entries so old failed
+    text is also removed from the derived index on its next consolidation.
+    The source ledger remains unchanged and available for diagnosis.
+    """
+    kind = record.get("kind", record.get("speaker"))
+    if record.get("origin") in {"simulation", "design_seed", "reflection", "inference"}:
+        return False
+    if kind in {"user", "user_turn"}:
+        return record.get("status") in {"recorded", "complete", "completed"}
+    return kind in {"assistant", "assistant_turn"} and record.get("status") in {"complete", "completed"}
+
+
 class SleepController:
     def __init__(self, store, agenda=None):
         self.store, self.agenda = store, agenda
@@ -53,7 +68,7 @@ class SleepController:
             if self._wake.is_set():
                 return {"interrupted": True, "checkpoint": checkpoint["value"] if checkpoint else None}
             # This summarizes actual utterances, not facts asserted by them.
-            if event["kind"] in {"user", "assistant", "user_turn", "assistant_turn"}:
+            if _complete_utterance(event):
                 excerpts.append({"event_id": event["id"], "speaker": event["kind"],
                                  "status": event["status"], "origin": event["origin"],
                                  "quoted_excerpt": event["content"][:240],
@@ -65,12 +80,13 @@ class SleepController:
         with self._lock:
             if self._wake.is_set() or self.state()["phase"] != "consolidating":
                 return {"interrupted": True, "checkpoint": checkpoint["value"] if checkpoint else None}
+            prior_excerpts = checkpoint["value"].get("excerpts", []) if checkpoint else []
             value = {"session_id": session_id, "scope": scope,
                      "last_seq": records[-1]["seq"] if records else last_seq,
                      "kind": "conversation_excerpt_index", "not_verified_facts": True,
-                     "excerpts": ((checkpoint["value"].get("excerpts", []) if checkpoint else []) + excerpts)[-100:],
+                     "excerpts": ([item for item in prior_excerpts if _complete_utterance(item)] + excerpts)[-100:],
                      "pending_jobs": pending,
-                     "source_event_ids": [event["id"] for event in records]}
+                     "source_event_ids": [item["event_id"] for item in excerpts]}
             result = self.store.write_document("checkpoints", key, value,
                                                expected_version=checkpoint["version"] if checkpoint else 0)
             if job_id is not None and self.agenda is not None:

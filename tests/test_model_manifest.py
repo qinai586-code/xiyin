@@ -11,10 +11,12 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import URLError
+import venv
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -161,6 +163,62 @@ class ModelManifestTests(unittest.TestCase):
         with patch.object(download, "load_manifest", return_value=self.manifest), redirect_stderr(io.StringIO()):
             self.assertEqual(download.main(["--check", "--destination", str(self.target)]), 1)
         self.assertFalse(self.target.parent.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Launcher subprocess behavior requires native Windows")
+    def test_windows_launcher_selects_project_python_and_explicit_override(self):
+        launcher_root = self.tmp / "launcher project"
+        scripts = launcher_root / "tools"
+        scripts.mkdir(parents=True)
+        launcher = scripts / "start_model.ps1"
+        shutil.copyfile(ROOT / "tools" / "start_model.ps1", launcher)
+        record = self.tmp / "interpreter.json"
+        # Run an actual checker process but deliberately fail model verification
+        # before the launcher can start any server or read model weights.
+        (scripts / "download_model.py").write_text(
+            'import json, os, pathlib, sys\n'
+            'pathlib.Path(os.environ["XIYIN_TEST_INTERPRETER"]).write_text('
+            'json.dumps({"executable": sys.executable, "argv": sys.argv[1:]}), encoding="utf-8")\n'
+            'raise SystemExit(37)\n', encoding="utf-8")
+        environment = os.environ.copy()
+        environment["XIYIN_TEST_INTERPRETER"] = str(record)
+        shells = list(dict.fromkeys(path for name in ("powershell.exe", "pwsh.exe")
+                                   if (path := shutil.which(name))))
+        self.assertTrue(shells, "Windows CI must provide PowerShell")
+
+        def run(shell, extra=()):
+            return subprocess.run(
+                [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                 "-File", str(launcher), "-ServerPath", sys.executable, *extra],
+                cwd=self.tmp, env=environment, capture_output=True,
+                encoding="utf-8", errors="replace", timeout=30)
+
+        for shell in shells:
+            with self.subTest(shell=shell, python="missing default"):
+                result = run(shell)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("-Mode setup", result.stdout + result.stderr)
+                self.assertFalse(record.exists())
+            with self.subTest(shell=shell, python="explicit without project venv"):
+                result = run(shell, ("-PythonPath", sys.executable))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Model verification failed", result.stdout + result.stderr)
+                used = json.loads(record.read_text(encoding="utf-8"))
+                self.assertEqual(Path(used["executable"]), Path(sys.executable))
+                self.assertEqual(used["argv"], ["--check"])
+                record.unlink()
+
+        venv.EnvBuilder(with_pip=False).create(launcher_root / ".venv")
+        project_python = launcher_root / ".venv" / "Scripts" / "python.exe"
+        for shell in shells:
+            for extra, expected in (((), project_python), (("-PythonPath", sys.executable), Path(sys.executable))):
+                with self.subTest(shell=shell, python=str(expected)):
+                    result = run(shell, extra)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Model verification failed", result.stdout + result.stderr)
+                    used = json.loads(record.read_text(encoding="utf-8"))
+                    self.assertEqual(Path(used["executable"]), expected)
+                    self.assertEqual(used["argv"], ["--check"])
+                    record.unlink()
 
     @unittest.skipUnless(os.name == "nt", "PowerShell parser and Windows argv require native Windows")
     def test_windows_launcher_syntax_and_argument_round_trip(self):

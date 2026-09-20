@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$ServerPath,
-    [string]$PythonPath = "python",
+    [string]$PythonPath,
     [string]$ModelPath,
     [ValidateRange(0, 999)]
     [int]$GpuLayers = 0
@@ -13,6 +13,17 @@ param(
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $checker = Join-Path $PSScriptRoot "download_model.py"
+if (-not $PSBoundParameters.ContainsKey("PythonPath")) {
+    $PythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
+}
+$pythonCommand = $null
+if (-not [string]::IsNullOrWhiteSpace($PythonPath)) {
+    $pythonCommand = Get-Command -Name $PythonPath -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+}
+if (-not $pythonCommand) {
+    throw "Python executable was not found. Run tools/windows.ps1 -Mode setup, or pass -PythonPath with an existing Python 3.12 executable."
+}
+$PythonPath = $pythonCommand.Source
 if (-not (Test-Path -LiteralPath $ServerPath -PathType Leaf)) {
     throw "ServerPath must point to an existing llama-server.exe."
 }

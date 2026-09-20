@@ -46,8 +46,10 @@
 4. 准备兼容 Qwen3.5 的 [llama.cpp Windows server](https://github.com/ggml-org/llama.cpp/releases)，在另一个终端启动：
 
    ```powershell
-   .\tools\start_model.ps1 -ServerPath 'C:\Tools\llama.cpp\llama-server.exe' -PythonPath '.\.venv\Scripts\python.exe'
+   .\tools\start_model.ps1 -ServerPath 'C:\Tools\llama.cpp\llama-server.exe'
    ```
+
+   脚本默认使用项目 `.venv\Scripts\python.exe`；如需其他 Python 3.12，可显式传 `-PythonPath`。缺少解释器时会提示先运行 setup。
 
    CPU 是明确的默认；确认后端支持且显存允许时再传 `-GpuLayers`。脚本只绑定 `127.0.0.1:8080`，模型 alias 为 `xiyin`，单前台槽、4K 上下文。不自动选择 CUDA、不调用云模型。研究源码 pin 不是已实测的 Windows 二进制版本；实际 server 版本和 GPU offload 必须记录在实机验证中。
 

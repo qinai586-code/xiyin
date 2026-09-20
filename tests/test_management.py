@@ -104,11 +104,15 @@ class ManagementTests(unittest.TestCase):
         self.console.assert_called_once()
         prompt = self.console.call_args.args[0]
         self.assertIn("MEMORY_APPROVE", prompt)
-        self.assertIn(json.dumps(str(src))[1:-1], prompt)
+        displayed, _ = json.JSONDecoder().raw_decode(prompt[prompt.index("{"):])
+        self.assertEqual(displayed["action"], "MEMORY_APPROVE")
+        self.assertEqual({key: Path(value) for key, value in displayed["targets"].items()},
+                         {"source": src, "destination": dst})
         records = self.records()
         self.assertEqual([record["status"] for record in records], ["REQUESTED", "CONFIRMED", "SUCCEEDED"])
         self.assertEqual(len({record["request_id"] for record in records}), 1)
-        self.assertEqual(records[-1]["targets"], {"source": str(src), "destination": str(dst)})
+        self.assertEqual({key: Path(value) for key, value in records[-1]["targets"].items()},
+                         {"source": src, "destination": dst})
 
     def test_reject_has_a_distinct_action_reason_and_one_confirmation(self):
         src = self.pending()

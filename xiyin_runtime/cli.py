@@ -47,7 +47,9 @@ def initialize_data(*, adopt_existing=False) -> dict:
 def doctor(*, probe_model=False) -> tuple[dict, bool]:
     report = {"platform": platform.platform(), "python": platform.python_version(),
               "windows_native": os.name == "nt", "checks": {},
-              "audio_and_gpu_performance": "not_measured"}
+              "audio_and_gpu_performance": "not_measured",
+              "runtime_session": "not_started",
+              "filesystem_write_access": "not_tested_read_only"}
     checks = report["checks"]
     settings = None
     try:
@@ -60,11 +62,23 @@ def doctor(*, probe_model=False) -> tuple[dict, bool]:
         checks["data"] = {"ok": True, "root": str(xiyin_paths.data_root()), "id": xiyin_paths.data_root_id()}
     except Exception as exc:
         checks["data"] = {"ok": False, "detail": str(exc), "next": "Run init-data explicitly, or select the existing marked data root"}
+    identity = {"ok": False}
     try:
+        # Read the mode for explanation only. Authorization still validates the
+        # real process token and cwd; this diagnostic never substitutes a role.
+        import xiyin_identity
+        policy = xiyin_identity.load_policy(xiyin_paths.project_root())
+        identity["mode"] = policy["mode"]
+        identity["account_boundary"] = (
+            "current Windows account; management confirmation is application-level, not OS isolation"
+            if policy["mode"] == "single_user" else
+            "separate runtime/reviewer SID policy; existing account restrictions remain in force"
+        )
         authorize_runtime()
-        checks["windows_identity"] = {"ok": True}
+        identity["ok"] = True
     except Exception as exc:
-        checks["windows_identity"] = {"ok": False, "detail": str(exc)}
+        identity["detail"] = str(exc)
+    checks["windows_identity"] = identity
     report["dependencies"] = {name: importlib.metadata.version(name) for name in ("httpx", "requests")}
     if probe_model and settings and checks["windows_identity"]["ok"]:
         async def probe():

@@ -7,7 +7,10 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from snapshot_tool import create_memory_snapshot, _validate_tree
+import snapshot_tool as _snapshot_tool
+if Path(_snapshot_tool.__file__).resolve() != Path(__file__).resolve().with_name("snapshot_tool.py"):
+    raise RuntimeError("snapshot_tool import source mismatch")
+from snapshot_tool import _create_confirmed_snapshot, _validate_tree, _stamp, _management
 
 
 def _xiyin_init_root():
@@ -78,11 +81,16 @@ HARDWARE_PROFILE_PATH = os.path.abspath(
 EXPECTED_OPERATOR = None
 
 
-def _ensure_dirs():
+def _validate_dirs():
     for directory in [SNAPSHOT_ROOT, AUDIT_DIR, *TARGET_DIRS.values()]:
         _paths._inside(_XIYIN_ROOT, Path(directory))
     if len({Path(p).resolve() for p in TARGET_DIRS.values()}) != len(TARGET_DIRS):
         raise ValueError("snapshot target directories must be distinct")
+    return None
+
+
+def _ensure_dirs():
+    _validate_dirs()
     os.makedirs(SNAPSHOT_ROOT, exist_ok=True)
     os.makedirs(AUDIT_DIR, exist_ok=True)
     for _, path in TARGET_DIRS.items():
@@ -100,18 +108,8 @@ def _load_runtime_policy() -> dict:
 
 
 def _require_admin_user() -> str:
-    """验证当前进程令牌属于 reviewer 身份集（审核+快照恢复，A2 合并保留）。
-
-    返回验证出的显示名（令牌 SID → 策略 [identity.review_display]）；
-    getpass/环境变量不参与授权；令牌读取或策略校验失败即拒绝。"""
-    identity = _xiyin_identity()
-    policy = identity.load_policy(_XIYIN_ROOT)
-    role, sid = identity.current_role(policy)
-    if role != "reviewer":
-        raise PermissionError(
-            f"Only reviewer identity may restore memory snapshots "
-            f"(token role={role!r})")
-    return identity.reviewer_display_name(policy, sid)
+    """Verify the current Windows token under the selected account mode."""
+    return _management().verified_operator(_XIYIN_ROOT)
 
 
 def _validate_operator(operator: str) -> str:
@@ -157,7 +155,7 @@ def _audit(action: str, detail: dict):
 
 def restore_memory_snapshot(snapshot_id: str, operator: str = None) -> bool:
     safe_operator = _validate_operator(operator)
-    _ensure_dirs()
+    _validate_dirs()
     memory_policy = _load_runtime_policy()
     safe_snapshot_id = _validate_snapshot_id(snapshot_id)
     snap_dir = _resolve_snapshot_dir(safe_snapshot_id)
@@ -174,11 +172,34 @@ def restore_memory_snapshot(snapshot_id: str, operator: str = None) -> bool:
         _validate_tree(Path(snap_dir) / key)
         _validate_tree(target)
 
-    protective_snapshot_id = None
-    if memory_policy.get("snapshot_required_before_restore", True):
-        protective_snapshot_dir = create_memory_snapshot(operator=safe_operator)
-        protective_snapshot_id = os.path.basename(protective_snapshot_dir)
-        _validate_snapshot_id(protective_snapshot_id)
+    protective_snapshot_id = _stamp() if memory_policy.get("snapshot_required_before_restore", True) else None
+    scope = {**TARGET_DIRS, "snapshot_source": snap_dir}
+    if protective_snapshot_id is not None:
+        scope["created_snapshot"] = _resolve_snapshot_dir(protective_snapshot_id)
+    with _management().management_action(
+            _XIYIN_ROOT, "SNAPSHOT_RESTORE", scope, operator=safe_operator,
+            detail={"snapshot_id": safe_snapshot_id, "replaces_existing_target_contents": True}) as lease:
+        _restore_confirmed_snapshot(lease, safe_operator, safe_snapshot_id, protective_snapshot_id)
+    return True
+
+
+def _restore_confirmed_snapshot(lease, safe_operator, safe_snapshot_id, protective_snapshot_id):
+    snap_dir = _resolve_snapshot_dir(safe_snapshot_id)
+    scope = {**TARGET_DIRS, "snapshot_source": snap_dir}
+    if protective_snapshot_id is not None:
+        scope["created_snapshot"] = _resolve_snapshot_dir(protective_snapshot_id)
+    _management().require_scope(lease, _XIYIN_ROOT, {"SNAPSHOT_RESTORE"}, scope)
+    safe_operator = _management().verified_operator(_XIYIN_ROOT, safe_operator)
+    # Recheck after human confirmation, before any tree is changed.
+    _validate_dirs()
+    for key, target in TARGET_DIRS.items():
+        if not os.path.isdir(os.path.join(snap_dir, key)):
+            raise FileNotFoundError(f"Snapshot missing target: {key}")
+        _validate_tree(Path(snap_dir) / key)
+        _validate_tree(target)
+    if protective_snapshot_id is not None:
+        _create_confirmed_snapshot(lease, safe_operator, protective_snapshot_id)
+    _ensure_dirs()
 
     for key, target_dir in TARGET_DIRS.items():
         src_dir = os.path.join(snap_dir, key)
@@ -204,7 +225,7 @@ def restore_memory_snapshot(snapshot_id: str, operator: str = None) -> bool:
         "snapshot_id": safe_snapshot_id,
         "operator": safe_operator,
         "protective_snapshot_id": protective_snapshot_id,
-        "policy_snapshot_required_before_restore": bool(memory_policy.get("snapshot_required_before_restore", True)),
+        "policy_snapshot_required_before_restore": protective_snapshot_id is not None,
     })
     return True
 

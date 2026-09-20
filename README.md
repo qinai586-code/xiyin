@@ -17,7 +17,11 @@
 
 ## Windows 上启动
 
-要求 Python 3.12。执行位置可以变化，但运行账户和工作目录仍须符合已有 `config/deployment.toml`；本次没有放宽 SID/ACL。`tools/windows.ps1` 自动切换到仓库的 `L2_CENTRAL` 后运行。已有机器配置若与实际位置不同，doctor 会明确报告，不自动改身份或目录授权。
+要求 Python 3.12。默认 `config/deployment.toml` 使用 `single_user`：从当前 Windows 账户直接运行，无需 `runas`、管理员终端、`SJ_Run` 密码或预先登记固定 SID。仍通过 Windows API 读取实际进程令牌，不接受用户名、环境变量或模型输出代替身份检查。`tools/windows.ps1` 自动切换到自身源码的 `L2_CENTRAL`；默认允许目录由源码根定位，移动独立副本不需要改成固定盘符路径。
+
+单账户下的管理确认属于**应用层操作确认，不是操作系统账户隔离**。同一账户可运行和维护代码；模型、提示词、Python 虚拟环境与 `XIYIN_DATA_ROOT` 都不能授予管理权限。显式保留旧双账户配置时，仍按 `separate_accounts` 检查运行／审核 SID，不能用新默认模式解释为旧白名单已经失效。
+
+保留的 `L5_SAFE/ADMIN_TOOLS` 旧记忆维护入口也接受当前账户。审核移动、快照创建和恢复会在 Windows 控制台显示本次动作、目标路径与随机确认文本，输入匹配后执行并记录审计；不接受管道输入、环境变量或 `--yes` 自动批准。恢复及其保护性快照共确认一次。它们维护旧文件记忆，不是 Foundation SQLite 的备份或纠错入口；普通文字对话和显式 `remember` 无需这些确认。同账户程序仍能修改代码或操控界面，因此这里没有声称防住同账户恶意程序。
 
 1. 安装隔离依赖（不以管理员权限运行模型）：
 
@@ -26,15 +30,27 @@
    .\tools\windows.ps1 -Mode doctor
    ```
 
-   doctor 默认不联网、不写数据。未初始化、未核对 Windows 身份或未探测模型时 `ready_for_text_runtime=false`，退出码 2 是未就绪，不是通过。
+   doctor 默认不联网、不写数据；报告实际配置模式及身份检查结果。未初始化、身份检查失败或未探测模型时 `ready_for_text_runtime=false`，退出码 2 是未就绪，不是通过。它不创建 Runtime 会话，也不通过试写来验证 ACL；即使配置、标记、身份与模型探针均通过，也不能替代真实会话和数据写入验收。
 
-2. 在已注册的运行身份下初始化数据。新空数据根用：
+2. 在当前账户下初始化数据。新空数据根用：
 
    ```powershell
    .\tools\windows.ps1 -Mode init-data
    ```
 
    如果已有 `L1_MEMORY` 内容，先备份，再显式使用 `-AdoptExisting`。此操作只登记该数据根，不把旧 `passed/wait_check` 自动导入栖音的新事实库。已存在有效标记则复用，绝不生成新身份覆盖它。外部 `XIYIN_DATA_ROOT` 必须预先存在；运行时不自动迁移数据。
+
+   仅测试时，在**新独立源码副本**中操作，使用当前账户可访问的新临时数据目录。例如：
+
+   ```powershell
+   $XiyinTestData = Join-Path $env:TEMP ('XIYIN_ACCOUNT_TEST_' + [guid]::NewGuid().ToString('N'))
+   New-Item -ItemType Directory -Path $XiyinTestData -ErrorAction Stop | Out-Null
+   $env:XIYIN_DATA_ROOT = $XiyinTestData
+   .\tools\windows.ps1 -Mode init-data
+   .\tools\windows.ps1 -Mode doctor
+   ```
+
+   后续 `chat` 使用同一终端中的该数据根；不要对原仓库执行 `reset`、清理、覆盖或 `-AdoptExisting` 来准备测试。测试结束后保留证据；关闭终端即可结束这个环境变量的会话作用域。如果复制后的源码、模型或数据仍受旧 NTFS ACL 限制，入口会报出实际拒绝访问；不要自动提权、夺取所有权或批量重写 ACL，应先确认当前账户有权使用的副本和目录。
 
 3. 下载固定版本的一个模型文件：
 
@@ -65,10 +81,13 @@
 
 ## 记忆和成长接口
 
-在已注册工作目录下，可用绝对路径调用 `xiyin.py`。例如明确记下一项由主理人提供的偏好：
+在允许的 `L2_CENTRAL` 工作目录下，可用绝对路径调用 `xiyin.py`。例如从源码根明确记下一项由主理人提供的偏好：
 
 ```powershell
-& '..\.venv\Scripts\python.exe' '..\xiyin.py' remember '我喜欢解谜游戏' --kind preference --subject owner
+Push-Location .\L2_CENTRAL
+try {
+    & '..\.venv\Scripts\python.exe' '..\xiyin.py' remember '我喜欢解谜游戏' --kind preference --subject owner
+} finally { Pop-Location }
 ```
 
 命令输出记忆 ID。纠正同一 kind/subject/scope 的条目可加 `--supersedes <旧ID>`；保存的是有来源的用户陈述，不宣称独立核实。底层 `ExperienceStore.remember()` 使用已有事件引用，替代与新版本在一个事务中提交。`kind=goal` 可保存续做事项，自动目标调度尚未实现。
@@ -93,8 +112,10 @@ Runtime 的显式记忆操作会记录成功或失败回执；成功回执与记
 
 测试覆盖路径与标记、Windows junction、人物成长优先、中文召回、来源和范围隔离、流取消竞态、重启连续性与失败恢复。GitHub Actions 在 Windows/Ubuntu 跑相同离线测试，并解析 PowerShell。夹具和模拟 HTTP 响应不是模型/音频实测，CI 不下载权重、不修改账户、不启动旧 G4 执行器。
 
+Windows 专属启动检查使用 CI 自身的真实进程令牌和默认单账户配置，打开实际 `FoundationRuntime`，在临时数据根写记忆并重启读取，另验证 C1 的绝对路径入口。它不发模型请求。管理测试使用合成文件树和明确的令牌／控制台替身，不等于已在主理人的 Windows 机器验收交互确认或 NTFS 权限。
+
 新增组合回归串联真实 SSE 客户端代码、Runtime、临时 SQLite、CLI/同步适配，使用模拟传输和明确的测试授权替身；检查末段截断、取消与恢复、回执原子性和上下文来源，不评价生成文本是否自然。`tests/fixtures/expression_cases.json` 提供 18 个尚未执行的 Windows 行为复测候选，包括同题正常/简短/详细表达、纠错、经历与记忆事实、能力和双语对应；没有标准回复模板。它不是启动模型批测的授权。后续实测须记录提交、模型和服务端参数、实际输入与逐字输出、终止原因及耗时，并区分组件探测与已授权 Runtime 验收；SID 或入口未就绪时不能报告整体通过。
 
 旧 `L5_SAFE/BASELINE`、`DEPLOY_BACKUP`、规则与评测资料保留原状；其中 QINAI 的人格或阶段冻结断言不代表 Foundation A 的验收标准。原 C2–C6 文件和管理工具是 legacy 路径，当前统一入口不调用它们；不要混用旧 `wait_check` 与新 SQLite 为两份权威。
 
-采用前保留现有部署文件和数据备份。若需要撤回代码，可回到此前 Git 提交；不要删除 `.xiyin_data` 或覆盖 SQLite 来“回滚人格”。本阶段没有修改旧记忆，没有不可逆数据库迁移，也没有变更 Windows 权限。依赖使用 `requirements.lock.txt` 固定；模型和参考录音/形象素材各自保留来源信息。
+采用前保留现有部署文件和数据备份。若需要撤回代码，可回到此前 Git 提交；不要删除 `.xiyin_data` 或覆盖 SQLite 来“回滚人格”。本次修改的是应用的账户选择与管理确认方式，不创建／删除 Windows 账户，不改变 NTFS ACL，不迁移旧记忆或数据库。依赖使用 `requirements.lock.txt` 固定；模型和参考录音/形象素材各自保留来源信息。

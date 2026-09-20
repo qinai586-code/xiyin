@@ -2,7 +2,7 @@
 # L2-C1 身份权限与环境校验模块 (V2.4 终极整合版)
 # 位置: <运行根>\L2_CENTRAL\C1_Auth\c1_gatekeeper.py
 # P3 重接线（XIYIN-PATH-IDENTITY-FULL-01）：运行身份 / 受信工作目录 / 容量
-# 三项分别校验；账户绑定（SJ_Run 用户名）与固定盘符路径解绑。
+# 三项分别校验；默认单账户模式仍读取真实令牌，另保留显式双账户部署。
 # =============================================================================
 
 import os
@@ -77,24 +77,13 @@ def qinai_permission_verify():
         # 0. 机器部署策略（缺失/损坏/非法 → 熔断，fail closed）
         policy = _XIYIN_IDENTITY.load_policy(_RUNTIME_ROOT)
 
-        # 1. 运行身份校验（进程主令牌 SID ∈ runtime_sids；强制自毁）
+        # 1. 真实进程令牌按显式部署模式校验；不读用户名或环境变量。
         role, sid = _XIYIN_IDENTITY.current_role(policy)
         if role != "runtime":
             _trigger_meltdown(f"检测到非授权账户越权。当前令牌 SID: [{sid}]")
 
         # 2. 物理运行路径校验（受信位置来自策略；修复目录逃逸漏洞）
-        cwd = os.getcwd()
-        cwd_norm = os.path.normcase(os.path.realpath(cwd))
-        allowed = False
-        for base in policy["allowed_cwd_roots"]:
-            b = os.path.normcase(os.path.realpath(base))
-            if not b.endswith(os.sep):
-                b += os.sep
-            if cwd_norm == b.rstrip(os.sep) or cwd_norm.startswith(b):
-                allowed = True
-                break
-        if not allowed:
-            _trigger_meltdown(f"工作目录异常，拦截非法目录逃逸/越权注入: {cwd}")
+        _XIYIN_IDENTITY.validate_runtime_cwd(policy, os.getcwd())
 
         # 3. 磁盘资源防熔断校验（运行根实际所在卷；阈值保留；强制自毁）
         _, _, free = shutil.disk_usage(str(_RUNTIME_ROOT))

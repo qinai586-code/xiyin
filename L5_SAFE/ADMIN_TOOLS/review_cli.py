@@ -57,7 +57,7 @@ def _xiyin_identity():
 
 # 仅作 operator 参数的显示默认值；授权完全取决于令牌 SID 与部署策略，
 # 与该常量无关（P3/A2 解绑；审核+快照恢复共用 reviewer 身份集）。
-EXPECTED_OPERATOR = "SJ_Admin"
+EXPECTED_OPERATOR = None
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 
@@ -68,16 +68,8 @@ def _validate_import_source():
 
 
 def _require_admin_user():
-    """验证当前进程令牌属于 reviewer 身份集；返回验证出的显示名。
-
-    getpass/环境变量不参与授权；令牌读取或策略校验失败即拒绝。"""
-    identity = _xiyin_identity()
-    policy = identity.load_policy(_XIYIN_ROOT)
-    role, sid = identity.current_role(policy)
-    if role != "reviewer":
-        raise PermissionError(
-            f"Only reviewer identity may run review_cli (token role={role!r})")
-    return identity.reviewer_display_name(policy, sid)
+    """Verify the current token; write confirmation belongs to the operation."""
+    return memory_review_tool._require_admin_user()
 
 
 def _has_control_char(value: str) -> bool:
@@ -111,7 +103,7 @@ def _validate_reason_arg(reason: str) -> str:
 def _build_parser():
     parser = argparse.ArgumentParser(
         prog="review_cli.py",
-        description="SJ_Admin memory review wrapper for wait_check governance.",
+        description="XIYIN memory review; writes require explicit Windows console confirmation.",
     )
     subparsers = parser.add_subparsers(dest="command")
 

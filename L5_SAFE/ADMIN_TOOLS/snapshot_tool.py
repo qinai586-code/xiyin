@@ -37,6 +37,26 @@ _XIYIN_ROOT = _xiyin_init_root()
 import xiyin_paths as _paths
 
 
+def _management():
+    import importlib.util
+    import sys
+    expected = Path(_XIYIN_ROOT) / "xiyin_management.py"
+    module = sys.modules.get("xiyin_management")
+    if module is not None:
+        if Path(getattr(module, "__file__", "")).resolve() != expected.resolve():
+            raise RuntimeError("xiyin_management import source mismatch")
+        return module
+    spec = importlib.util.spec_from_file_location("xiyin_management", expected)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["xiyin_management"] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop("xiyin_management", None)
+        raise
+    return module
+
+
 def _xiyin_identity():
     """A4/P3 共享身份适配器一次性显式加载（固定布局 <运行根>\\xiyin_identity.py；
     同名伪模块拒绝；无环境变量改选配置来源）。"""
@@ -75,11 +95,16 @@ SNAPSHOT_ID_PATTERN = re.compile(r"^\d{8}_\d{6}$")
 EXPECTED_OPERATOR = None
 
 
-def _ensure_dirs():
+def _validate_dirs():
     for directory in [SNAPSHOT_ROOT, AUDIT_DIR, *TARGET_DIRS.values()]:
         _paths._inside(_XIYIN_ROOT, Path(directory))
     if len({Path(p).resolve() for p in TARGET_DIRS.values()}) != len(TARGET_DIRS):
         raise ValueError("snapshot target directories must be distinct")
+    return None
+
+
+def _ensure_dirs():
+    _validate_dirs()
     os.makedirs(SNAPSHOT_ROOT, exist_ok=True)
     os.makedirs(AUDIT_DIR, exist_ok=True)
     for _, path in TARGET_DIRS.items():
@@ -95,18 +120,8 @@ def _stamp():
 
 
 def _require_admin_user() -> str:
-    """验证当前进程令牌属于 reviewer 身份集（审核+快照恢复，A2 合并保留）。
-
-    返回验证出的显示名（令牌 SID → 策略 [identity.review_display]）；
-    getpass/环境变量不参与授权；令牌读取或策略校验失败即拒绝。"""
-    identity = _xiyin_identity()
-    policy = identity.load_policy(_XIYIN_ROOT)
-    role, sid = identity.current_role(policy)
-    if role != "reviewer":
-        raise PermissionError(
-            f"Only reviewer identity may manage memory snapshots "
-            f"(token role={role!r})")
-    return identity.reviewer_display_name(policy, sid)
+    """Verify the current Windows token under the selected account mode."""
+    return _management().verified_operator(_XIYIN_ROOT)
 
 
 def _validate_operator(operator: str) -> str:
@@ -154,24 +169,43 @@ def _validate_tree(path):
     """Preflight recursive snapshot operations without following reparse points."""
     path = Path(path)
     _paths._inside(_XIYIN_ROOT, path)
-    if path.exists() and path.lstat().st_file_attributes & 0x400:
+    if path.is_symlink() or (path.exists() and getattr(path.lstat(), "st_file_attributes", 0) & 0x400):
         raise ValueError("snapshot tree root is a reparse point")
+    if not path.exists():
+        # Existing behavior creates absent target areas, but only after the
+        # operation's explicit confirmation rather than during preflight.
+        return
     def fail(error):
         raise error
     for base, dirs, files in os.walk(path, followlinks=False, onerror=fail):
         for name in dirs + files:
             child = Path(base) / name
-            if child.lstat().st_file_attributes & 0x400:
+            if child.is_symlink() or getattr(child.lstat(), "st_file_attributes", 0) & 0x400:
                 raise ValueError("snapshot tree contains a reparse point")
 
 
 def create_memory_snapshot(operator: str = None) -> str:
     safe_operator = _validate_operator(operator)
-    _ensure_dirs()
+    _validate_dirs()
     for directory in TARGET_DIRS.values():
         _validate_tree(directory)
     snap_id = _stamp()
     snap_dir = _resolve_snapshot_dir(snap_id)
+    with _management().management_action(
+            _XIYIN_ROOT, "SNAPSHOT_CREATE", {**TARGET_DIRS, "created_snapshot": snap_dir},
+            operator=safe_operator) as lease:
+        return _create_confirmed_snapshot(lease, safe_operator, snap_id)
+
+
+def _create_confirmed_snapshot(lease, safe_operator, snap_id):
+    """The restore path reuses its already-confirmed, scope-bound operation."""
+    snap_dir = _resolve_snapshot_dir(snap_id)
+    _management().require_scope(lease, _XIYIN_ROOT, {"SNAPSHOT_CREATE", "SNAPSHOT_RESTORE"},
+                                {**TARGET_DIRS, "created_snapshot": snap_dir})
+    safe_operator = _management().verified_operator(_XIYIN_ROOT, safe_operator)
+    _ensure_dirs()
+    for directory in TARGET_DIRS.values():
+        _validate_tree(directory)
     os.makedirs(snap_dir, exist_ok=False)
 
     for key, src_dir in TARGET_DIRS.items():
@@ -194,7 +228,9 @@ def create_memory_snapshot(operator: str = None) -> str:
 
 def list_snapshots():
     _require_admin_user()
-    _ensure_dirs()
+    _validate_dirs()
+    if not os.path.isdir(SNAPSHOT_ROOT):
+        return []
     items = []
     for name in os.listdir(SNAPSHOT_ROOT):
         if not SNAPSHOT_ID_PATTERN.fullmatch(name):

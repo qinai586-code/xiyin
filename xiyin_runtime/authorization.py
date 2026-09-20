@@ -1,4 +1,4 @@
-"""Reuse the registered Windows runtime identity without changing its policy."""
+"""Validate the configured Windows runtime without a fixed local account."""
 
 import os
 from pathlib import Path
@@ -14,16 +14,14 @@ class AuthorizationError(RuntimeError):
 
 def authorize_runtime() -> None:
     if os.name != "nt":
-        raise AuthorizationError("Live runtime requires the registered Windows machine; offline tests and doctor remain available")
+        raise AuthorizationError("Live runtime requires Windows; offline tests and doctor remain available")
     try:
         root = xiyin_paths.project_root()
         policy = xiyin_identity.load_policy(root)
         role, _ = xiyin_identity.current_role(policy)
         if role != "runtime":
-            raise AuthorizationError("Current Windows token is not a registered runtime identity")
-        cwd = Path.cwd().resolve()
-        if not any(cwd.is_relative_to(Path(p).resolve()) for p in policy["allowed_cwd_roots"]):
-            raise AuthorizationError("Working directory is outside the registered runtime locations")
+            raise AuthorizationError("Current Windows token is not a permitted runtime identity")
+        xiyin_identity.validate_runtime_cwd(policy, Path.cwd())
         if shutil.disk_usage(root).free < 1024 * 1024 * 1024:
             raise AuthorizationError("Runtime volume has less than 1 GiB free")
     except AuthorizationError:

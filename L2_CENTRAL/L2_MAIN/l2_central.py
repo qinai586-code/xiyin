@@ -2,7 +2,7 @@
 
 The original baseline is retained in Git history. This entry and xiyin.py share
 one Runtime; legacy QINAI prompts, keyword persona locks and wait_check writes
-are not active on this path. Registered Windows identity remains required.
+are not active on this path. The configured Windows token/path policy still applies.
 """
 from pathlib import Path
 import sys

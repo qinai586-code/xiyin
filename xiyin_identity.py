@@ -1,47 +1,25 @@
 # -*- coding: utf-8 -*-
-"""XIYIN 薄共享身份适配器 + 严格机器配置读取（P3，A2/A3）。
+"""Windows token identity and explicit local deployment policy.
 
-一个共享实现，供 C1 与全部审核/管理入口复用；不在各模块复制 ctypes
-或账户解析逻辑。定位与加载：各消费方以自身 __file__ 锚定运行根后，
-按固定布局 <运行根>\\xiyin_identity.py 一次性显式加载本模块（与
-xiyin_paths.py 相同的加载协议；同名伪模块拒绝）。
+The default single_user mode has no account-name or machine-SID allowlist.
+It reads the real process token for attribution; runtime permission also needs
+valid deployment paths and resource checks. Management uses its own explicit
+console confirmation, not a second Windows login. This is an application guard,
+not isolation from other programs running as the same Windows user.
 
-适用假设（明确写出，未验证的场景不得宣称覆盖）：
-  - 本模块读取的是当前【进程主令牌】（GetCurrentProcess ->
-    OpenProcessToken(TOKEN_QUERY)）。
-  - 不跟随、不假设线程模拟令牌（ThreadImpersonation）。若部署形态
-    使用模拟，必须先另行验证再扩展本模块。
-  - 任何 Windows API 失败（打开令牌、尺寸探测、缓冲读取、SID 转换、
-    句柄/内存释放）一律抛 TokenReadError 拒绝，绝不回退 getpass、
-    环境变量或用户名比较。
-
-机器配置（deployment contract，候选形态）：
-  - 位置：<运行根>\\config\\deployment.toml —— 由运行根派生，不接受
-    任何环境变量改选/重定向（A3：生产授权入口不得凭调用方可改的
-    环境变量选择 SID 白名单）。最终生产受信位置由部署契约裁决。
-  - 结构（tomllib，严格）：
-      [identity]
-      runtime_sids  = ["S-1-..."]   # 运行身份（原 SJ_Run 职责）
-      reviewer_sids = ["S-1-..."]   # 审核+快照恢复身份（原 SJ_Admin
-                                    # 合并职责，A2：不擅自拆分）
-      [identity.review_display]
-      "S-1-..." = "显示名"           # 仅显示/审计文本，绝不参与授权
-      [runtime]
-      allowed_cwd_roots = ["C:\\..."]  # 运行 cwd 受信位置（原 C1
-                                       # ALLOWED_EXEC_PATH 语义）
-  - 校验（全部失败即拒绝，缺/坏/链/非法条目不放过）：
-      配置缺失 / 非常规文件 / 本身是重解析点 / 解析错误 / 未知键或表 /
-      runtime_sids 与 reviewer_sids 交集非空 / SID 不符合严格语法 /
-      reviewer 无显示名 / 显示名映射含未知 SID / allowed_cwd_roots
-      非绝对、不存在、本身是重解析点、normcase 重复。
-  - 测试注入方式：仅通过构造合成运行树（本模块没有任何测试后门；
-    真实入口不继承任何默认开启的测试绕过）。
+Existing separate-account deployments remain opt-in compatible: omission of
+identity.mode retains the old disjoint SID lists, without a silent fallback.
+The policy comes only from <code root>/config/deployment.toml, never environment
+variables. Windows token failures are fatal; usernames are never authority.
+Thread impersonation is not supported: identity is the process primary token.
 """
 from __future__ import annotations
 
 import ctypes
+import importlib.util
 import os
 import re
+import sys
 import tomllib
 from ctypes import wintypes
 from pathlib import Path
@@ -49,7 +27,7 @@ from pathlib import Path
 __all__ = [
     "IdentityConfigError", "TokenReadError",
     "current_token_sid", "load_policy", "role_for_sid", "current_role",
-    "reviewer_display_name", "policy_path_for_root",
+    "reviewer_display_name", "policy_path_for_root", "validate_runtime_cwd",
 ]
 
 POLICY_RELPATH = os.path.join("config", "deployment.toml")
@@ -112,6 +90,8 @@ def _load_advapi32():
 def current_token_sid() -> str:
     """当前进程主令牌的用户 SID（字符串形态）。任何 API 失败即抛
     TokenReadError；绝不回退用户名/环境变量。"""
+    if os.name != "nt":
+        raise TokenReadError("Windows process tokens are unavailable on this platform")
     advapi32, kernel32 = _load_advapi32()
     TOKEN_QUERY = 0x0008
     TokenUser = 1
@@ -171,9 +151,12 @@ def policy_path_for_root(root: Path | str) -> Path:
 
 def _is_reparse(path: Path) -> bool:
     try:
-        return bool(os.lstat(str(path)).st_file_attributes & 0x400)
-    except OSError:
+        info = os.lstat(path)
+        return path.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+    except FileNotFoundError:
         return False
+    except OSError as exc:
+        raise IdentityConfigError(f"Cannot inspect policy path {path}: {exc}") from exc
 
 
 def _require_sid_list(raw, label: str) -> list:
@@ -188,13 +171,34 @@ def _require_sid_list(raw, label: str) -> list:
     return out
 
 
+def _portable_runtime_path(root: Path, entry: str) -> Path:
+    # C1 can be executed by absolute filename without the code root on sys.path.
+    # Load the sibling resolver explicitly, rejecting a preloaded namesake.
+    expected = Path(__file__).resolve().with_name("xiyin_paths.py")
+    paths = sys.modules.get("xiyin_paths")
+    if paths is not None and Path(getattr(paths, "__file__", "")).resolve() != expected:
+        raise IdentityConfigError("xiyin_paths pseudo-module rejected")
+    if paths is None:
+        spec = importlib.util.spec_from_file_location("xiyin_paths", expected)
+        paths = importlib.util.module_from_spec(spec)
+        sys.modules["xiyin_paths"] = paths
+        try:
+            spec.loader.exec_module(paths)
+        except BaseException:
+            sys.modules.pop("xiyin_paths", None)
+            raise
+    try:
+        return paths.under(root, entry)
+    except paths.XiyinPathError as exc:
+        raise IdentityConfigError(f"Invalid runtime relative directory: {exc}") from exc
+
+
 def load_policy(root: Path | str) -> dict:
     """读取并严格校验 <运行根>\\config\\deployment.toml。
 
     任何缺失/损坏/链接/非法条目 -> IdentityConfigError（拒绝）。
-    返回结构（调用方只读）：
-      {"runtime_sids": [...], "reviewer_sids": [...],
-       "review_display": {sid: name}, "allowed_cwd_roots": [str, ...]}"""
+    返回结构（调用方只读）：mode、角色 SID 列表、显示名及已解析的 cwd。
+    single_user 不使用 SID 列表；没有 mode 的旧配置继续严格分离账户。"""
     root = Path(root).resolve(strict=True)
     path = policy_path_for_root(root)
     # A plain leaf is insufficient when its config parent is a junction.
@@ -222,42 +226,48 @@ def load_policy(root: Path | str) -> dict:
     identity = data.get("identity")
     if not isinstance(identity, dict):
         raise IdentityConfigError("[identity] table missing or invalid")
-    known_identity_keys = {"runtime_sids", "reviewer_sids", "review_display"}
+    mode = identity.get("mode", "separate_accounts")
+    if mode not in ("single_user", "separate_accounts"):
+        raise IdentityConfigError("identity.mode must be single_user or separate_accounts")
+    known_identity_keys = {"mode"}
+    if mode == "separate_accounts":
+        known_identity_keys |= {"runtime_sids", "reviewer_sids", "review_display"}
     unknown_identity = set(identity) - known_identity_keys
     if unknown_identity:
         raise IdentityConfigError(
-            f"unknown [identity] keys: {sorted(unknown_identity)}")
-
-    runtime_sids = _require_sid_list(identity.get("runtime_sids"),
-                                     "identity.runtime_sids")
-    reviewer_sids = _require_sid_list(identity.get("reviewer_sids"),
-                                      "identity.reviewer_sids")
-    overlap = sorted(set(runtime_sids) & set(reviewer_sids))
-    if overlap:
-        raise IdentityConfigError(
-            f"runtime_sids and reviewer_sids must not overlap: {overlap}")
-
-    raw_display = identity.get("review_display")
-    if not isinstance(raw_display, dict) or not raw_display:
-        raise IdentityConfigError(
-            "[identity.review_display] table missing or invalid")
-    review_display = {}
-    for sid, name in raw_display.items():
-        if not _valid_sid(sid):
-            raise IdentityConfigError(f"review_display key is not a SID: {sid!r}")
-        if not isinstance(name, str) or not name.strip() or "\x00" in name \
-                or any(ord(c) < 32 for c in name):
+            f"unknown [identity] keys for {mode}: {sorted(unknown_identity)}")
+    runtime_sids, reviewer_sids, review_display = [], [], {}
+    if mode == "separate_accounts":
+        runtime_sids = _require_sid_list(identity.get("runtime_sids"),
+                                         "identity.runtime_sids")
+        reviewer_sids = _require_sid_list(identity.get("reviewer_sids"),
+                                          "identity.reviewer_sids")
+        overlap = sorted(set(runtime_sids) & set(reviewer_sids))
+        if overlap:
             raise IdentityConfigError(
-                f"review_display name for {sid} is not a clean nonempty string")
-        review_display[sid] = name
-    unknown_display = sorted(set(review_display) - set(reviewer_sids))
-    if unknown_display:
-        raise IdentityConfigError(
-            f"review_display contains non-reviewer SIDs: {unknown_display}")
-    missing_display = sorted(set(reviewer_sids) - set(review_display))
-    if missing_display:
-        raise IdentityConfigError(
-            f"reviewer SIDs without display name: {missing_display}")
+                f"runtime_sids and reviewer_sids must not overlap: {overlap}")
+
+        raw_display = identity.get("review_display")
+        if not isinstance(raw_display, dict) or not raw_display:
+            raise IdentityConfigError(
+                "[identity.review_display] table missing or invalid")
+        review_display = {}
+        for sid, name in raw_display.items():
+            if not _valid_sid(sid):
+                raise IdentityConfigError(f"review_display key is not a SID: {sid!r}")
+            if not isinstance(name, str) or not name.strip() or "\x00" in name \
+                    or any(ord(c) < 32 for c in name):
+                raise IdentityConfigError(
+                    f"review_display name for {sid} is not a clean nonempty string")
+            review_display[sid] = name
+        unknown_display = sorted(set(review_display) - set(reviewer_sids))
+        if unknown_display:
+            raise IdentityConfigError(
+                f"review_display contains non-reviewer SIDs: {unknown_display}")
+        missing_display = sorted(set(reviewer_sids) - set(review_display))
+        if missing_display:
+            raise IdentityConfigError(
+                f"reviewer SIDs without display name: {missing_display}")
 
     runtime_tbl = data.get("runtime")
     if not isinstance(runtime_tbl, dict):
@@ -276,13 +286,23 @@ def load_policy(root: Path | str) -> dict:
         if not isinstance(entry, str) or not entry.strip():
             raise IdentityConfigError(
                 f"allowed_cwd_roots entry is not a nonempty string: {entry!r}")
-        p = Path(entry)
-        if not p.is_absolute():
-            raise IdentityConfigError(
-                f"allowed_cwd_roots entry is not absolute: {entry!r}")
-        if _is_reparse(p):
-            raise IdentityConfigError(
-                f"allowed_cwd_roots entry is a reparse point: {entry!r}")
+        if mode == "single_user":
+            # Same portable component rules as config/paths.toml; no drive,
+            # expansion, traversal, empty components, or Windows device names.
+            p = _portable_runtime_path(root, entry)
+            raw = root
+            for part in entry.split("/"):
+                raw /= part
+                if _is_reparse(raw):
+                    raise IdentityConfigError(f"Runtime directory contains a link: {raw}")
+        else:
+            p = Path(entry)
+            if not p.is_absolute():
+                raise IdentityConfigError(
+                    f"allowed_cwd_roots entry is not absolute: {entry!r}")
+            if _is_reparse(p):
+                raise IdentityConfigError(
+                    f"allowed_cwd_roots entry is a reparse point: {entry!r}")
         if not p.is_dir():
             raise IdentityConfigError(
                 f"allowed_cwd_roots entry does not exist as a directory: {entry!r}")
@@ -295,6 +315,7 @@ def load_policy(root: Path | str) -> dict:
         allowed_cwd_roots.append(str(p))
 
     return {
+        "mode": mode,
         "runtime_sids": runtime_sids,
         "reviewer_sids": reviewer_sids,
         "review_display": review_display,
@@ -310,7 +331,14 @@ ROLE_REVIEWER = "reviewer"
 
 
 def role_for_sid(policy: dict, sid: str) -> str | None:
-    """SID -> "runtime" | "reviewer" | None。策略加载时已保证两集不相交。"""
+    """Classify an OS-derived SID; this pure helper never reads usernames."""
+    if not _valid_sid(sid) or len(sid) > _SID_MAX_LEN:
+        raise TokenReadError("Invalid process token SID")
+    mode = policy.get("mode", "separate_accounts")
+    if mode == "single_user":
+        return ROLE_RUNTIME
+    if mode != "separate_accounts":
+        raise IdentityConfigError("Unknown identity mode")
     if sid in policy["runtime_sids"]:
         return ROLE_RUNTIME
     if sid in policy["reviewer_sids"]:
@@ -326,7 +354,31 @@ def current_role(policy: dict) -> tuple:
 
 def reviewer_display_name(policy: dict, sid: str) -> str:
     """审核身份的显示名（仅显示/审计文本；绝不用作授权依据）。"""
+    if policy.get("mode") == "single_user":
+        if not _valid_sid(sid):
+            raise TokenReadError("Invalid process token SID")
+        return f"Windows user {sid}"
     name = policy["review_display"].get(sid)
     if name is None:
         raise IdentityConfigError(f"no display name for reviewer SID {sid}")
     return name
+
+
+def validate_runtime_cwd(policy: dict, cwd: Path | str) -> Path:
+    """Validate an existing cwd under a configured root; no empty-list fallback.
+
+    Containment uses resolved paths, so a link into another directory cannot
+    escape the allowlist. This is not a filesystem race or OS security boundary.
+    """
+    try:
+        current = Path(cwd).resolve(strict=True)
+        if not current.is_dir():
+            raise IdentityConfigError("Working directory is not a directory")
+        if not any(current.is_relative_to(Path(base).resolve(strict=True))
+                   for base in policy["allowed_cwd_roots"]):
+            raise IdentityConfigError("Working directory is outside the configured runtime locations")
+        return current
+    except (OSError, RuntimeError) as exc:
+        if isinstance(exc, IdentityConfigError):
+            raise
+        raise IdentityConfigError(f"Working directory check failed: {exc}") from exc

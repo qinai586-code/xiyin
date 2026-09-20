@@ -38,6 +38,26 @@ _XIYIN_ROOT = _xiyin_init_root()
 import xiyin_paths as _paths
 
 
+def _management():
+    import importlib.util
+    import sys
+    expected = Path(_XIYIN_ROOT) / "xiyin_management.py"
+    module = sys.modules.get("xiyin_management")
+    if module is not None:
+        if Path(getattr(module, "__file__", "")).resolve() != expected.resolve():
+            raise RuntimeError("xiyin_management import source mismatch")
+        return module
+    spec = importlib.util.spec_from_file_location("xiyin_management", expected)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["xiyin_management"] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop("xiyin_management", None)
+        raise
+    return module
+
+
 def _xiyin_identity():
     """A4/P3 共享身份适配器一次性显式加载（固定布局 <运行根>\\xiyin_identity.py；
     同名伪模块拒绝；无环境变量改选配置来源）。"""
@@ -165,18 +185,8 @@ def _validate_filename(filename: str) -> str:
 
 
 def _require_admin_user() -> str:
-    """验证当前进程令牌属于 reviewer 身份集（审核+快照恢复，A2 合并保留）。
-
-    返回验证出的显示名（令牌 SID → 策略 [identity.review_display]）；
-    getpass/环境变量不参与授权；令牌读取或策略校验失败即拒绝。
-    审计记录的 operator 字段 = 该验证结果（A2：审计主体取验证结果）。"""
-    identity = _xiyin_identity()
-    policy = identity.load_policy(_XIYIN_ROOT)
-    role, sid = identity.current_role(policy)
-    if role != "reviewer":
-        raise PermissionError(
-            f"Only reviewer identity may review memory (token role={role!r})")
-    return identity.reviewer_display_name(policy, sid)
+    """Verify the current Windows token under the selected account mode."""
+    return _management().verified_operator(_XIYIN_ROOT)
 
 
 def _validate_operator(operator: str) -> str:
@@ -262,7 +272,9 @@ def _audit(action: str, filename: str, operator: str, detail: str = ""):
 
 def list_pending_files():
     _require_admin_user()
-    _ensure_dirs()
+    validate_config_paths()
+    if not os.path.isdir(WAIT_CHECK_DIR):
+        return []
     files = []
     for name in os.listdir(WAIT_CHECK_DIR):
         try:
@@ -276,7 +288,7 @@ def list_pending_files():
 
 def read_pending_file(filename: str) -> str:
     _require_admin_user()
-    _ensure_dirs()
+    validate_config_paths()
     safe_filename = _validate_filename(filename)
     path = _resolve_under_root(WAIT_CHECK_DIR, safe_filename)
     if not os.path.isfile(path):
@@ -288,17 +300,23 @@ def read_pending_file(filename: str) -> str:
 def approve_memory(filename: str, operator: str = None) -> str:  # F9: 默认由验证结果决定
     safe_operator = _validate_operator(operator)
     safe_filename = _validate_filename(filename)
-    _ensure_dirs()
+    validate_config_paths()
     src = _resolve_under_root(WAIT_CHECK_DIR, safe_filename)
     dst = _resolve_under_root(PASSED_DIR, safe_filename)
 
     if not os.path.isfile(src):
         raise FileNotFoundError(f"Pending memory not found: {safe_filename}")
 
-    _audit("APPROVE_BEGIN", safe_filename, safe_operator, "begin wait_check to passed")
-    shutil.copy2(src, dst)
-    os.remove(src)
-    _audit("APPROVE_COMMIT", safe_filename, safe_operator, "moved wait_check to passed")
+    with _management().management_action(
+            _XIYIN_ROOT, "MEMORY_APPROVE", {"source": src, "destination": dst},
+            operator=safe_operator, detail={"removes_source": True}) as lease:
+        _management().require_scope(lease, _XIYIN_ROOT, {"MEMORY_APPROVE"},
+                                    {"source": src, "destination": dst})
+        _ensure_dirs()
+        _audit("APPROVE_BEGIN", safe_filename, safe_operator, "begin wait_check to passed")
+        shutil.copy2(src, dst)
+        os.remove(src)
+        _audit("APPROVE_COMMIT", safe_filename, safe_operator, "moved wait_check to passed")
     return dst
 
 
@@ -306,16 +324,22 @@ def reject_memory(filename: str, reason: str, operator: str = None) -> str:  # F
     safe_operator = _validate_operator(operator)
     safe_filename = _validate_filename(filename)
     safe_reason = _validate_reason(reason)
-    _ensure_dirs()
+    validate_config_paths()
     src = _resolve_under_root(WAIT_CHECK_DIR, safe_filename)
     dst = _resolve_under_root(REJECTED_DIR, safe_filename)
 
     if not os.path.isfile(src):
         raise FileNotFoundError(f"Pending memory not found: {safe_filename}")
 
-    _audit("REJECT_BEGIN", safe_filename, safe_operator, safe_reason)
-    shutil.move(src, dst)
-    _audit("REJECT_COMMIT", safe_filename, safe_operator, safe_reason)
+    with _management().management_action(
+            _XIYIN_ROOT, "MEMORY_REJECT", {"source": src, "destination": dst},
+            operator=safe_operator, detail={"reason": safe_reason, "removes_source": True}) as lease:
+        _management().require_scope(lease, _XIYIN_ROOT, {"MEMORY_REJECT"},
+                                    {"source": src, "destination": dst})
+        _ensure_dirs()
+        _audit("REJECT_BEGIN", safe_filename, safe_operator, safe_reason)
+        shutil.move(src, dst)
+        _audit("REJECT_COMMIT", safe_filename, safe_operator, safe_reason)
     return dst
 
 

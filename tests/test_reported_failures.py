@@ -275,6 +275,44 @@ class FalsePremiseTests(RuntimeCase):
         self.assertIn("今晚想看星星", prompt)
         self.assertIn("用户", prompt)
 
+    async def test_a_negated_claim_is_not_confirmed_by_the_positive_record(self):
+        # Term overlap cannot see polarity: "今晚想看星星" and "今晚不想看星星"
+        # share every bigram but one. Confirming the second from the first
+        # would be the reported failure with extra confidence behind it.
+        provider = ScriptedProvider()
+        runtime = self.runtime(provider)
+        await self.ask(runtime, "今晚想看星星。")
+        await self.ask(runtime, "你刚才说过今晚不想看星星")
+        prompt = provider.system_prompt
+        self.assertIn("肯定/否定与这句话相反", prompt)
+        self.assertIn("今晚想看星星", prompt)
+        self.assertNotIn("记录中有相符的内容", prompt)
+        # The invariant across phrasings is that a negated claim is never
+        # confirmed; landing on "no matching record" instead is also correct.
+        for claim in ("你之前说过你没有想看星星", "你不是说过不想看星星吗"):
+            with self.subTest(claim=claim):
+                await self.ask(runtime, claim)
+                self.assertNotIn("记录中有相符的内容", provider.system_prompt)
+
+    async def test_a_claim_cannot_be_laundered_through_the_users_own_earlier_claim(self):
+        # Assert it once, then cite your own assertion. The first turn is in
+        # history, so a naive scan confirms the second — the record contains
+        # the claim, not the fact.
+        provider = ScriptedProvider()
+        runtime = self.runtime(provider)
+        await self.ask(runtime, "你刚才说过你讨厌解谜游戏")
+        await self.ask(runtime, "你之前说过你讨厌解谜游戏对吧")
+        prompt = provider.system_prompt
+        self.assertIn("没有找到相符的内容", prompt)
+        self.assertNotIn("记录中有相符的内容", prompt)
+
+    async def test_matching_polarity_still_confirms(self):
+        provider = ScriptedProvider()
+        runtime = self.runtime(provider)
+        await self.ask(runtime, "今晚不想看星星。")
+        await self.ask(runtime, "你刚才说过今晚不想看星星吧")
+        self.assertIn("记录中有相符的内容", provider.system_prompt)
+
     async def test_a_claim_too_short_to_match_is_left_undecided(self):
         # Confirming on one generic word would repeat the reported failure in
         # the other direction, so a thin quote is reported as uncheckable.

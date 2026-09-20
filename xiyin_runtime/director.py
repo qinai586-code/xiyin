@@ -199,6 +199,12 @@ class Director:
 
     def propose_growth(self, kind, subject, statement, evidence_refs, session_id="owner", scope="private"):
         session_id, scope = _session(session_id, scope)
+        if scope != "private":
+            # A viewer can send feedback, and feedback is what growth reads. Without
+            # this, a public adapter could plant a growth-shaped payload and shape
+            # her character — `expression:public` most of all. Scope isolation keeps
+            # such a memory out of private turns, but it must not form at all.
+            raise PermissionError("Character growth requires owner-scope evidence; viewers cannot shape it")
         self._growth_field(kind, subject)
         statement = _text(statement, "growth statement")
         if len(statement) > 2000:
@@ -224,6 +230,8 @@ class Director:
         model's output, or from the mere passage of time.
         """
         session_id, scope = _session(session_id, scope)
+        if scope != "private":
+            return []
         known = {item["value"].get("digest") for item in self.store.list_documents("candidates")
                  if item["value"].get("candidate_type") == "character_growth"}
         results = []

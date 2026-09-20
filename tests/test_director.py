@@ -177,10 +177,15 @@ class DirectorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.feedback("assistant assertion", event_kind="assistant")
         candidate = self.feedback("private style")
-        for session, scope in (("other", "private"), ("owner", "public")):
-            with self.assertRaises(ValueError):
-                self.director.propose_growth("preference", "expression:private", "private style",
-                                             candidate["evidence_refs"], session_id=session, scope=scope)
+        # Evidence from another session is unsupported; public scope is refused
+        # outright, matching propose_goal — a viewer may send feedback, so
+        # growth must not read it even when the statement would be valid.
+        with self.assertRaises(ValueError):
+            self.director.propose_growth("preference", "expression:private", "private style",
+                                         candidate["evidence_refs"], session_id="other", scope="private")
+        with self.assertRaises(PermissionError):
+            self.director.propose_growth("preference", "expression:private", "private style",
+                                         candidate["evidence_refs"], session_id="owner", scope="public")
 
     def test_growth_rollback_returns_seed_or_prior_override_without_rewriting_history(self):
         seed = self.state.snapshot()["expression"]["private"]

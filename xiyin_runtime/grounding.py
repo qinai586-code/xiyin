@@ -27,7 +27,13 @@ _AFTER_VERB = re.compile(
     r"(?:说过|讲过|提过|提到过|告诉过我|答应过|承诺过|保证过|说|讲|提到|告诉我)\s*"
     r"[，,：:]?\s*(.{2,120}?)(?:[。？！?!\n]|$)")
 
-_QINAI = re.compile(r"祈奈|qinai", re.I)
+# The seed defines exactly one sister, so "你姐姐"/"你妹妹" ask about the same
+# record set. Possessive-scoped on purpose: the owner's own sibling is not this.
+# A lexical trigger is still a lexical trigger — an unanticipated paraphrase
+# reaches the model with no inventory at all.
+_QINAI = re.compile(r"祈奈|qinai|(?:你|妳|栖音)(?:的)?\s*(?:姐姐|妹妹|姊姊|姐妹)|"
+                    r"\byour\s+(?:sister|sibling)\b", re.I)
+_QINAI_MEMORY = re.compile(r"祈奈|qinai", re.I)
 _BACKGROUND = re.compile(
     r"(?:刚才|刚刚|这段时间|这几天|这阵子|我不在|不在的时候|没在的时候|离开的时候|"
     r"睡(?:觉|着)的时候|昨晚|后台|背着我|自己一个人|一个人的时候)"
@@ -112,6 +118,17 @@ def _overlap(claim_terms: list[str], candidate: str) -> float:
     return sum(1 for term in claim_terms if term in body) / len(claim_terms)
 
 
+# Term overlap cannot see polarity: "今晚想看星星" and "今晚不想看星星" share
+# every bigram but one. Reporting the first as support for the second would
+# hand the model false confidence — a worse version of the failure this check
+# exists to prevent — so a polarity difference downgrades a match.
+_NEGATION = re.compile(r"不|没有|没|别|未|非|无|勿|甭|甭|\bnot\b|n't\b|\bno\b|\bnever\b", re.I)
+
+
+def _polarity(text: str) -> int:
+    return len(_NEGATION.findall(text or "")) % 2
+
+
 def _claimed_content(text: str) -> str | None:
     quoted = _QUOTED.search(text)
     if quoted:
@@ -139,6 +156,11 @@ def premise_records(store, text: str, *, session_id: str, scope: str) -> list[di
     terms = _terms(claim or text)
     best_score, best_role, best_text = 0.0, None, None
     for message in store.history(session_id, scope=scope, limit=60):
+        # A user turn that was itself a claim about the record is not evidence
+        # of the record. Without this, asserting something once and then citing
+        # your own assertion launders it into "记录中有相符的内容".
+        if message["role"] == "user" and _PRIOR_CLAIM.search(message["content"]):
+            continue
         score = _overlap(terms, message["content"])
         if score > best_score:
             best_score, best_role, best_text = score, message["role"], message["content"]
@@ -153,10 +175,16 @@ def premise_records(store, text: str, *, session_id: str, scope: str) -> list[di
         header["说明"] = ("不要仅凭这句话确认或否认。可以请对方说得具体一点，"
                           "或说明需要更完整的原话才能查。")
     elif best_score >= 0.6 and best_text:
-        header["结果"] = "记录中有相符的内容"
+        speaker = {"user": "用户", "assistant": "栖音", "memory": "已保存的长期记忆"}[best_role]
         header["记录中的原话"] = _brief(best_text, 200)
-        header["说话者"] = {"user": "用户", "assistant": "栖音", "memory": "已保存的长期记忆"}[best_role]
-        header["说明"] = "可以据此确认。仍要核对说话者：旧的自述只说明说过，不证明做过。"
+        header["说话者"] = speaker
+        if _polarity(claim or text) != _polarity(best_text):
+            header["结果"] = "找到相近的记录，但肯定/否定与这句话相反"
+            header["说明"] = ("不要当作确认。记录里的说法和对方这句话方向相反，"
+                              "把原话说出来，问清楚是哪一句。")
+        else:
+            header["结果"] = "记录中有相符的内容"
+            header["说明"] = "可以据此确认。仍要核对说话者：旧的自述只说明说过，不证明做过。"
     else:
         header["结果"] = "没有找到相符的内容"
         header["说明"] = ("记录不支持这句话。如实说明没有这条记录，请对方补充；"
@@ -188,8 +216,10 @@ def topic_records(store, text: str, *, session_id: str, scope: str) -> list[dict
     """
     records: list[dict[str, str]] = []
     if _QINAI.search(text):
-        memories = _memory_matches(store, scope, _QINAI)
-        events = _event_matches(store, session_id, scope, _QINAI)
+        # Search stored text by her name; "你姐姐" is how the question is
+        # phrased, not how a record would be written.
+        memories = _memory_matches(store, scope, _QINAI_MEMORY)
+        events = _event_matches(store, session_id, scope, _QINAI_MEMORY)
         record = {"来源": "记录清单", "主题": "与祈奈相关的记录",
                   "已保存的长期记忆": f"{len(memories)} 条",
                   "本会话对话记录": f"{len(events)} 条"}

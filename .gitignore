@@ -1,2 +1,13 @@
 __pycache__/
 *.log
+._*
+.DS_Store
+.venv/
+*.py[cod]
+L1_MEMORY/
+models/
+vendor/
+*.sqlite3*
+.env
+.pytest_cache/
+run/

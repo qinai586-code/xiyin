@@ -2,9 +2,18 @@
 # inference endpoint + machine state locations). Deployed values may be
 # re-registered per machine; the code/data roots are NOT authorized here.
 [inference]
-endpoint = "http://127.0.0.1:11434/generate"
+endpoint = "http://127.0.0.1:8080/v1/chat/completions"
+model = "xiyin"
+timeout_seconds = 60
+max_tokens = 512
+enable_thinking = false
 
-[machine]
-# A5/PARTIAL: heartbeat producer chain NOT VERIFIED this round; default
-# preserves the original literal location (behavior unchanged).
-heartbeat_dir = "C:\\Users\\SJ_Run\\AppData\\Local\\Temp\\qinai_launcher_runtime_state"
+[foundation]
+max_input_chars = 2000
+# Character budget is a guard, not an exact model-token count.
+max_context_chars = 4500
+history_messages = 8
+
+[autonomy]
+# Foreground input preempts bounded jobs. No model-driven activity is auto-enabled.
+idle_sleep_seconds = 300

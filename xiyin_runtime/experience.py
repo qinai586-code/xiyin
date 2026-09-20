@@ -1,0 +1,281 @@
+"""A local, single-owner experience ledger and versioned memory projection.
+
+Events belong to one session; memories are explicitly promoted, durable
+knowledge for this owner/character pair. Scope must come from the trusted
+caller, never from text or model-provided metadata. This module is storage,
+not authentication. One connection is serialized by a reentrant lock.
+"""
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+from uuid import uuid4
+
+
+SCOPES = frozenset({"private", "public"})
+STATUSES = frozenset({"recorded", "generated", "complete", "completed", "partial",
+                      "cancelled", "failed", "verified_success", "verified_failure", "unknown"})
+ORIGINS = frozenset({"observation", "user_report", "user_statement", "owner_statement", "assistant_output",
+                     "tool_result", "generated", "reflection", "inference", "simulation", "design_seed"})
+MEMORY_KINDS = frozenset({"fact", "preference", "opinion", "relationship", "persona", "strategy", "skill", "goal"})
+INCOMPLETE = frozenset({"generated", "partial", "cancelled", "failed", "unknown"})
+NON_EVIDENCE = frozenset({"generated", "reflection", "inference", "simulation", "design_seed"})
+
+
+def _text(value: str, field: str) -> str:
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise ValueError(f"{field} must be non-empty text without NUL")
+    return value.strip()
+
+
+def _scope(value: str) -> str:
+    if value not in SCOPES:
+        raise ValueError("scope must be private or public")
+    return value
+
+
+def _limit(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 1000:
+        raise ValueError("limit must be an integer between 1 and 1000")
+    return value
+
+
+class ExperienceStore:
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self._closed = False
+        self._db = sqlite3.connect(str(path), check_same_thread=False, timeout=10)
+        self._db.row_factory = sqlite3.Row
+        self._db.execute("PRAGMA foreign_keys = ON")
+        self._db.execute("PRAGMA journal_mode = WAL")
+        with self._db:
+            self._db.executescript("""
+                CREATE TABLE IF NOT EXISTS events (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    scope TEXT NOT NULL CHECK(scope IN ('private', 'public')),
+                    kind TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    request_id TEXT
+                );
+                CREATE INDEX IF NOT EXISTS events_session_scope ON events(session_id, scope, seq);
+                CREATE TABLE IF NOT EXISTS memories (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    scope TEXT NOT NULL CHECK(scope IN ('private', 'public')),
+                    statement TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    evidence_refs TEXT NOT NULL,
+                    supersedes TEXT REFERENCES memories(id),
+                    active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1))
+                );
+                CREATE INDEX IF NOT EXISTS memories_scope_active ON memories(scope, active, seq);
+                CREATE UNIQUE INDEX IF NOT EXISTS memories_one_successor ON memories(supersedes)
+                    WHERE supersedes IS NOT NULL;
+            """)
+
+    def __enter__(self) -> "ExperienceStore":
+        self._ensure_open()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
+    def close(self) -> None:
+        with self._lock:
+            if not self._closed:
+                self._db.close()
+                self._closed = True
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("experience store is closed")
+
+    def append_event(self, kind: str, content: str | dict, *, session_id: str,
+                     scope: str = "private", origin: str = "observation",
+                     status: str = "recorded", request_id: str | None = None) -> str:
+        kind = _text(kind, "kind")
+        session_id = _text(session_id, "session_id")
+        scope = _scope(scope)
+        if origin not in ORIGINS:
+            raise ValueError("unsupported event origin")
+        if status not in STATUSES:
+            raise ValueError("unsupported event status")
+        if not isinstance(content, (str, dict)):
+            raise ValueError("content must be text or an event object")
+        # Metadata in a content object is deliberately never promoted to columns.
+        serialized = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        if "\x00" in serialized:
+            raise ValueError("content cannot contain NUL")
+        if request_id is not None:
+            request_id = _text(request_id, "request_id")
+        event_id = "event_" + uuid4().hex
+        with self._lock:
+            self._ensure_open()
+            with self._db:
+                self._db.execute(
+                    "INSERT INTO events(id, created_at, session_id, scope, kind, content, origin, status, request_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (event_id, datetime.now(timezone.utc).isoformat(), session_id, scope, kind,
+                     serialized, origin, status, request_id),
+                )
+        return event_id
+
+    def list_events(self, session_id: str, scope: str = "private") -> list[dict]:
+        """Return the session ledger including failures and partial/cancelled output."""
+        session_id, scope = _text(session_id, "session_id"), _scope(scope)
+        with self._lock:
+            self._ensure_open()
+            return [dict(row) for row in self._db.execute(
+                "SELECT * FROM events WHERE session_id = ? AND scope = ? ORDER BY seq", (session_id, scope))]
+
+    def history(self, session_id: str, scope: str = "private", limit: int = 12) -> list[dict]:
+        """Return chronological complete text messages, never unfinished assistant turns.
+
+        ``recorded`` user inputs are complete observations. Assistant generation
+        becomes history only after the caller records ``complete/completed``.
+        Completed text with origin=generated is a complete textual response,
+        not evidence of audio playback, human attention or a successful action.
+        Extra metadata can be stripped to role/content by an API adapter.
+        """
+        session_id, scope, limit = _text(session_id, "session_id"), _scope(scope), _limit(limit)
+        with self._lock:
+            self._ensure_open()
+            rows = self._db.execute("""
+                SELECT * FROM events WHERE session_id = ? AND scope = ? AND (
+                    (kind IN ('user', 'user_turn') AND status IN ('recorded', 'complete', 'completed')) OR
+                    (kind IN ('assistant', 'assistant_turn') AND status IN ('complete', 'completed'))
+                ) AND origin NOT IN ('simulation', 'design_seed', 'reflection', 'inference')
+                ORDER BY seq DESC LIMIT ?
+            """, (session_id, scope, limit)).fetchall()
+        return [{"role": "user" if row["kind"] in {"user", "user_turn"} else "assistant",
+                 "content": row["content"], "event_id": row["id"], "scope": row["scope"],
+                 "origin": row["origin"], "status": row["status"]} for row in reversed(rows)]
+
+    def remember(self, statement: str, *, kind: str = "fact", subject: str = "owner",
+                 scope: str = "private", evidence_refs: list[str], supersedes: str | None = None) -> str:
+        """Promote supported knowledge; corrections atomically retire the prior version.
+
+        A source proves that a statement/observation occurred, not that arbitrary
+        claims inside it are true. The caller decides what is justified by it.
+        """
+        statement, subject, scope = _text(statement, "statement"), _text(subject, "subject"), _scope(scope)
+        if kind not in MEMORY_KINDS:
+            raise ValueError("unsupported memory kind")
+        if not isinstance(evidence_refs, list) or not evidence_refs:
+            raise ValueError("memory requires existing evidence_refs")
+        refs = list(dict.fromkeys(_text(ref, "evidence_ref") for ref in evidence_refs))
+        memory_id = "memory_" + uuid4().hex
+        with self._lock:
+            self._ensure_open()
+            with self._db:
+                origins = []
+                for ref in refs:
+                    source = self._db.execute("SELECT * FROM events WHERE id = ?", (ref,)).fetchone()
+                    if source is not None:
+                        unfinished_assistant = (source["kind"] in {"assistant", "assistant_turn"}
+                                                and source["status"] not in {"complete", "completed"})
+                        if (source["scope"] != scope or source["status"] in INCOMPLETE
+                                or source["origin"] in NON_EVIDENCE or unfinished_assistant):
+                            raise ValueError("evidence is incomplete, generated, or outside the memory scope")
+                        origins.append(source["origin"])
+                    else:
+                        source = self._db.execute("SELECT * FROM memories WHERE id = ? AND active = 1", (ref,)).fetchone()
+                        if source is None or source["scope"] != scope:
+                            raise ValueError("memory evidence must exist and have the same scope")
+                        origins.append(source["origin"])
+                if supersedes is not None:
+                    prior = self._db.execute("SELECT * FROM memories WHERE id = ? AND active = 1", (supersedes,)).fetchone()
+                    if prior is None or (prior["scope"], prior["kind"], prior["subject"]) != (scope, kind, subject):
+                        raise ValueError("supersedes must be an active memory of the same scope, kind and subject")
+                    self._db.execute("UPDATE memories SET active = 0 WHERE id = ?", (supersedes,))
+                origin = origins[0] if len(set(origins)) == 1 else "mixed_evidence"
+                self._db.execute("""
+                    INSERT INTO memories(id, created_at, kind, subject, scope, statement, origin, evidence_refs, supersedes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (memory_id, datetime.now(timezone.utc).isoformat(), kind, subject, scope, statement,
+                      origin, json.dumps(refs), supersedes))
+        return memory_id
+
+    @staticmethod
+    def _memory_dict(row: sqlite3.Row) -> dict:
+        result = dict(row)
+        result["evidence_refs"] = json.loads(result["evidence_refs"])
+        result["active"] = bool(result["active"])
+        return result
+
+    def memories(self, scope: str = "private", kind: str | None = None) -> list[dict]:
+        scope = _scope(scope)
+        if kind is not None and kind not in MEMORY_KINDS:
+            raise ValueError("unsupported memory kind")
+        sql, params = "SELECT * FROM memories WHERE scope = ? AND active = 1", [scope]
+        if kind is not None:
+            sql += " AND kind = ?"
+            params.append(kind)
+        with self._lock:
+            self._ensure_open()
+            return [self._memory_dict(row) for row in self._db.execute(sql + " ORDER BY seq", params)]
+
+    def search(self, query: str, *, scope: str = "private", session_id: str | None = None,
+               limit: int = 5) -> list[dict]:
+        """Lexical recall with Chinese bigrams; no embedding service or network.
+
+        Without a session_id only explicitly promoted long-term memories are
+        searched. Session observations are historical evidence, not current
+        facts. Incomplete and imagined events never enter ordinary retrieval.
+        """
+        query, scope, limit = _text(query, "query"), _scope(scope), _limit(limit)
+        if session_id is not None:
+            session_id = _text(session_id, "session_id")
+        if len(query) > 2000:
+            raise ValueError("query is too long")
+        terms = [query.casefold()]
+        for token in re.findall(r"[\w]+", query.casefold()):
+            terms.append(token)
+            if re.search(r"[\u3400-\u9fff]", token):
+                terms.extend(token[i:i + 2] for i in range(len(token) - 1))
+        terms = list(dict.fromkeys(terms))[:64]
+        # Parameterized instr supports Chinese without requiring a particular
+        # SQLite FTS tokenizer, including common two-character queries.
+        predicate = " OR ".join("instr(lower({column}), ?) > 0" for _ in terms)
+        with self._lock:
+            self._ensure_open()
+            candidates = []
+            for row in self._db.execute(
+                "SELECT * FROM memories WHERE scope = ? AND active = 1 AND ("
+                + predicate.format(column="statement") + ")", [scope, *terms]
+            ):
+                item = self._memory_dict(row)
+                item.update({"source": "memory", "content": item["statement"]})
+                candidates.append(item)
+            if session_id is not None:
+                rows = self._db.execute(
+                    "SELECT * FROM events WHERE scope = ? AND session_id = ? AND status NOT IN "
+                    "('generated', 'partial', 'cancelled', 'failed', 'unknown') AND origin NOT IN "
+                    "('generated', 'reflection', 'inference', 'simulation', 'design_seed') "
+                    "AND (kind NOT IN ('assistant', 'assistant_turn') OR status IN ('complete', 'completed')) AND ("
+                    + predicate.format(column="content") + ")", [scope, session_id, *terms]
+                )
+                for row in rows:
+                    item = dict(row)
+                    item["source"] = "event"
+                    item["historical_observation"] = True
+                    candidates.append(item)
+        for item in candidates:
+            body = item["content"].casefold()
+            item["score"] = sum(len(term) for term in terms if term in body)
+        return sorted(candidates, key=lambda item: (
+            item["score"], item["source"] == "memory", item["seq"]), reverse=True)[:limit]

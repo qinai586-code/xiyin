@@ -1,7 +1,8 @@
 [paths]
 data = "L1_MEMORY"
 
-# A7: persona source pair (relative to run root; files intentionally
-# absent until the 主理人 approves an XIYIN persona source - F09 gap kept)
+character_seed = "config/persona/character.seed.json"
+
+# Legacy persona source pair retained for existing consumers.
 persona_rule = "config/persona/P1_persona_constitution.txt"
 persona_hash = "config/persona/P1_persona_constitution.txt.sha256"

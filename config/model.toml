@@ -1,0 +1,24 @@
+# A-stage text model: one GGUF at an immutable Hugging Face revision.
+# Size and SHA-256 verified against the repository's LFS metadata.
+[model]
+repo_id = "bartowski/Qwen_Qwen3.5-4B-GGUF"
+revision = "4168f45a16a1290d65a4ec0fa312ae917a4c15d6"
+filename = "Qwen_Qwen3.5-4B-Q4_K_M.gguf"
+size = 3013027808
+sha256 = "13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983"
+
+[server]
+host = "127.0.0.1"
+port = 8080
+alias = "xiyin"
+ctx_size = 4096
+parallel = 1
+jinja = true
+enable_thinking = false
+auto_mmproj = false
+
+# Documentation reference only, not a tested Windows binary or release pin.
+[reference]
+llama_cpp_docs_revision = "3cf03257f219afbe7334045ff7c6a06ac68c627d"
+llama_cpp_docs_url = "https://github.com/ggml-org/llama.cpp/blob/3cf03257f219afbe7334045ff7c6a06ac68c627d/tools/server/README.md"
+windows_binary_verified = false

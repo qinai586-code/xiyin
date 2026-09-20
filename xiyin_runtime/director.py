@@ -212,6 +212,52 @@ class Director:
                      digest=_digest(self._growth_payload(value)))
         return self.store.write_document("candidates", candidate_id, value, expected_version=0)["value"]
 
+    def review_feedback_growth(self, session_id="owner", scope="private", *, adopt=True, limit=8):
+        """Turn feedback already on record into growth, without asking again.
+
+        Growth existed but only ever started from an explicit owner command,
+        so real interaction outcomes never reached it. This reads the feedback
+        events the owner already gave, which ``_growth_evidence`` validates
+        against the same rules, and proposes the fields they support. Ordinary
+        reversible growth needs no separate approval; ``rollback_growth``
+        remains the way back. Nothing here infers a field from tone, from a
+        model's output, or from the mere passage of time.
+        """
+        session_id, scope = _session(session_id, scope)
+        known = {item["value"].get("digest") for item in self.store.list_documents("candidates")
+                 if item["value"].get("candidate_type") == "character_growth"}
+        results = []
+        for event in self.store.list_events(session_id, scope):
+            if len(results) >= limit:
+                break
+            if event["kind"] != "self_state_observation" or event["origin"] != "user_report":
+                continue
+            try:
+                payload = json.loads(event["content"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict) or payload.get("kind") != "user_feedback":
+                continue
+            growth = payload.get("payload", {}).get("growth") if isinstance(payload.get("payload"), dict) else None
+            if not isinstance(growth, dict) or set(growth) != {"kind", "subject", "statement"}:
+                continue
+            value = {**growth, "evidence_refs": [event["id"]], "session_id": session_id, "scope": scope}
+            try:
+                self._growth_field(growth["kind"], growth["subject"])
+            except ValueError:
+                continue
+            if _digest(self._growth_payload(value)) in known:
+                continue
+            try:
+                candidate = self.propose_growth(growth["kind"], growth["subject"], growth["statement"],
+                                                [event["id"]], session_id=session_id, scope=scope)
+                results.append(self.adopt_growth(candidate["id"]) if adopt else candidate)
+                known.add(candidate["digest"])
+            except (ValueError, KeyError):
+                # Unsupported or superseded feedback is skipped, not forced.
+                continue
+        return results
+
     def _candidate(self, candidate_id):
         document = self.store.read_document("candidates", candidate_id)
         if document is None:

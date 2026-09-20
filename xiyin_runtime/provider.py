@@ -78,12 +78,36 @@ def _urls(endpoint: str) -> tuple[str, str]:
 
 
 @dataclass(frozen=True)
+class GenerationBudget:
+    """One turn's ceiling, decided by the caller from the request and machine.
+
+    This replaces a single configured number used for every request. It is a
+    resource bound, not a length target: the text is never trimmed to fit it,
+    and exhausting it still raises ProviderTruncated.
+    """
+    max_tokens: int
+    timeout_seconds: float
+
+    def __post_init__(self) -> None:
+        if type(self.max_tokens) is not int or not 1 <= self.max_tokens <= 100000:
+            raise ProviderError("budget max_tokens must be a positive integer")
+        if (isinstance(self.timeout_seconds, bool)
+                or not isinstance(self.timeout_seconds, (int, float))
+                or not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0):
+            raise ProviderError("budget timeout_seconds must be finite and positive")
+
+
+@dataclass(frozen=True)
 class ProviderConfig:
     endpoint: str
     model: str
     timeout_seconds: float = 60
     max_tokens: int = 512
     enable_thinking: bool = False
+    max_tokens_ceiling: int = 1792
+    max_timeout_seconds: float = 600
+    context_tokens: int = 4096
+    default_tokens_per_second: float = 8.0
 
     def __post_init__(self) -> None:
         _urls(self.endpoint)
@@ -95,6 +119,20 @@ class ProviderConfig:
             raise ProviderError("max_tokens must be a positive integer")
         if type(self.enable_thinking) is not bool:
             raise ProviderError("enable_thinking must be boolean")
+        if type(self.max_tokens_ceiling) is not int or not self.max_tokens <= self.max_tokens_ceiling <= 100000:
+            raise ProviderError("max_tokens_ceiling must be an integer at or above max_tokens")
+        if (isinstance(self.max_timeout_seconds, bool)
+                or not isinstance(self.max_timeout_seconds, (int, float))
+                or not math.isfinite(self.max_timeout_seconds)
+                or self.max_timeout_seconds < self.timeout_seconds):
+            raise ProviderError("max_timeout_seconds must be finite and at least timeout_seconds")
+        if type(self.context_tokens) is not int or not 512 <= self.context_tokens <= 1000000:
+            raise ProviderError("context_tokens must be an integer from 512 to 1000000")
+        if (isinstance(self.default_tokens_per_second, bool)
+                or not isinstance(self.default_tokens_per_second, (int, float))
+                or not math.isfinite(self.default_tokens_per_second)
+                or not 0 < self.default_tokens_per_second <= 5000):
+            raise ProviderError("default_tokens_per_second must be finite and positive")
 
 
 async def _wait_io(awaitable: Awaitable[_T], cancel: asyncio.Event, deadline: float) -> _T:
@@ -218,9 +256,10 @@ class LocalModelClient:
         self._chat_url, self._health_url = _urls(config.endpoint)
         self._transport = transport
 
-    def _client(self) -> httpx.AsyncClient:
+    def _client(self, timeout: float | None = None) -> httpx.AsyncClient:
         return httpx.AsyncClient(
-            timeout=self.config.timeout_seconds, transport=self._transport,
+            timeout=self.config.timeout_seconds if timeout is None else timeout,
+            transport=self._transport,
             trust_env=False, follow_redirects=False,
             headers={"Accept-Encoding": "identity"},
         )
@@ -255,25 +294,32 @@ class LocalModelClient:
         except httpx.HTTPError as exc:
             raise ProviderError(f"local model health transport failed: {type(exc).__name__}") from exc
 
-    async def stream(self, messages: list[dict], cancel: asyncio.Event) -> AsyncIterator[str]:
+    async def stream(self, messages: list[dict], cancel: asyncio.Event,
+                     *, budget: GenerationBudget | None = None) -> AsyncIterator[str]:
         """Yield deltas once; a successful completion needs [DONE] and content.
 
-        timeout_seconds bounds the whole request, including waits between chunks.
-        A length limit yields its last content, then raises ProviderTruncated.
-        Errors after partial output remain errors; callers must not silently retry.
+        ``budget`` bounds this one request. Without it the configured defaults
+        apply, so existing callers behave exactly as before. The timeout bounds
+        the whole request, including waits between chunks. A length limit
+        yields its last content, then raises ProviderTruncated. Errors after
+        partial output remain errors; callers must not silently retry.
         """
         if cancel.is_set():
             raise ProviderCancelled("local model stream cancelled")
         if not isinstance(messages, list) or not messages or any(not isinstance(m, dict) for m in messages):
             raise ProviderError("messages must be a non-empty list of objects")
+        if budget is not None and not isinstance(budget, GenerationBudget):
+            raise ProviderError("budget must be a GenerationBudget")
+        max_tokens = budget.max_tokens if budget else self.config.max_tokens
+        timeout_seconds = budget.timeout_seconds if budget else self.config.timeout_seconds
         payload = {
             "model": self.config.model, "messages": messages,
-            "max_tokens": self.config.max_tokens, "stream": True,
+            "max_tokens": max_tokens, "stream": True,
             "chat_template_kwargs": {"enable_thinking": self.config.enable_thinking},
         }
-        deadline = time.monotonic() + self.config.timeout_seconds
+        deadline = time.monotonic() + timeout_seconds
         try:
-            async with self._client() as client:
+            async with self._client(timeout_seconds) as client:
                 try:
                     request = client.build_request("POST", self._chat_url, json=payload, headers={"Accept": "text/event-stream"})
                 except (TypeError, ValueError) as exc:

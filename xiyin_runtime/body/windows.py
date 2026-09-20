@@ -16,6 +16,7 @@ import json
 import os
 
 from .actions import DesktopAdapter
+from .models import InputRejected
 
 
 KEYS = {**{chr(value): value for value in range(ord("A"), ord("Z") + 1)},
@@ -123,15 +124,15 @@ class CtypesWin32API:
         with self._physical_coordinates():
             details = self.window_details(hwnd)
             if self.foreground() != hwnd or not 0 <= x < details["width"] or not 0 <= y < details["height"]:
-                raise PermissionError("Click target is outside the focused authorized client area")
+                raise InputRejected("Click target is outside the focused authorized client area")
             if self.key_pressed(1):
-                raise RuntimeError("Mouse button is already held; not taking ownership of existing input")
+                raise InputRejected("Mouse button is already held; not taking ownership of existing input")
             left, top = self.user32.GetSystemMetrics(76), self.user32.GetSystemMetrics(77)
             width, height = self.user32.GetSystemMetrics(78), self.user32.GetSystemMetrics(79)
             if width <= 1 or height <= 1:
                 raise OSError("Invalid virtual desktop geometry")
             if not left <= details["x"] + x < left + width or not top <= details["y"] + y < top + height:
-                raise ValueError("Client target is outside the visible virtual desktop")
+                raise InputRejected("Client target is outside the visible virtual desktop")
             absolute_x = round((details["x"] + x - left) * 65535 / (width - 1))
             absolute_y = round((details["y"] + y - top) * 65535 / (height - 1))
             move, down, up = _Input(type=0), _Input(type=0), _Input(type=0)
@@ -149,7 +150,7 @@ class CtypesWin32API:
         with self._physical_coordinates():
             details = self.window_details(hwnd)
             if self.foreground() != hwnd:
-                raise PermissionError("Screenshots require the authorized window to be foreground")
+                raise InputRejected("Screenshots require the authorized window to be foreground")
             image = ImageGrab.grab(bbox=(details["x"], details["y"], details["x"] + details["width"],
                                         details["y"] + details["height"]), all_screens=True)
             output = io.BytesIO()
@@ -183,7 +184,9 @@ class Win32DesktopDriver:
 
     def _require_foreground(self):
         if self._api is None or not self._api.is_window(self.hwnd) or self._api.foreground() != self.hwnd:
-            raise PermissionError("Authorized HWND must exist and be foreground; no focus stealing")
+            # Raised before any SendInput call, so the receipt can say plainly
+            # that nothing was dispatched rather than leaving it unknown.
+            raise InputRejected("Authorized HWND must exist and be foreground; no focus stealing")
 
     async def current_window(self):
         if self._api is None:
@@ -217,21 +220,21 @@ class Win32DesktopDriver:
         if operation == "click":
             x, y = arguments.get("x"), arguments.get("y")
             if type(x) is not int or type(y) is not int:
-                raise ValueError("Click coordinates must be integer client pixels")
+                raise InputRejected("Click coordinates must be integer client pixels")
             details = self._api.window_details(self.hwnd)
             if not 0 <= x < details["width"] or not 0 <= y < details["height"]:
-                raise ValueError("Click is outside the client rectangle")
+                raise InputRejected("Click is outside the client rectangle")
             self._api.click(self.hwnd, x, y)
         elif operation == "key_down":
             key = arguments.get("key")
             if key not in KEYS:
-                raise ValueError("Key is outside the restricted key set (no Win/Alt/Ctrl system chords)")
+                raise InputRejected("Key is outside the restricted key set (no Win/Alt/Ctrl system chords)")
             if self._api.key_pressed(KEYS[key]):
-                raise RuntimeError("Key is already physically pressed; existing input is not owned by this adapter")
+                raise InputRejected("Key is already physically pressed; existing input is not owned by this adapter")
             self._pressed.add(key)
             self._api.key(KEYS[key])
         else:
-            raise ValueError("Unsupported Win32 operation")
+            raise InputRejected("Unsupported Win32 operation")
 
     async def release_key(self, key):
         if key in self._pressed:

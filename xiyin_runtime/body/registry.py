@@ -100,24 +100,37 @@ class BodyRegistry:
         epoch = self._epoch
         adapter = self._adapters.get(request.adapter_id)
 
-        def receipt(outcome: AdapterOutcome):
+        def receipt(outcome: AdapterOutcome, *, dispatched: bool | None = None):
+            """Record whether anything left this process, separately from success.
+
+            "Refused before dispatch" and "acted, and the postcondition was
+            false" were both reported as ``failure`` with no way to tell them
+            apart. The status still answers "did it work"; ``dispatched``
+            answers "did it happen at all", which is what a person actually
+            asks about a desktop or file action.
+            """
             status = outcome.status
             if status not in {"success", "failure", "cancelled", "unknown"}:
                 status = "unknown"
             if status == "success" and not outcome.verified:
                 status = "unknown"
+            evidence = dict(outcome.evidence)
+            if dispatched is not None and "dispatched" not in evidence:
+                evidence["dispatched"] = dispatched
+            if status == "success" and outcome.verified:
+                evidence.setdefault("dispatched", True)
             return ActionReceipt(request.action_id, request.adapter_id, request.operation, status,
                                  outcome.verified, outcome.detail, request.observation_id,
-                                 evidence=outcome.evidence)
+                                 evidence=evidence)
 
         if adapter is None:
-            return receipt(AdapterOutcome("failure", detail="Adapter is not registered"))
+            return receipt(AdapterOutcome("failure", detail="Adapter is not registered"), dispatched=False)
         async with self._locks[request.adapter_id]:
             try:
                 if request.adapter_id in self._unsettled or self._adapters.get(request.adapter_id) is not adapter:
                     raise RuntimeError("Adapter was replaced or has unresolved action cleanup")
                 if token.is_set():
-                    return receipt(AdapterOutcome("cancelled", detail="Cancelled before dispatch"))
+                    return receipt(AdapterOutcome("cancelled", detail="Cancelled before dispatch"), dispatched=False)
                 observation = self._observations.get(request.observation_id)
                 if observation is None:
                     raise ValueError("Observation is missing or expired from the registry")
@@ -133,9 +146,11 @@ class BodyRegistry:
                 if token.is_set():
                     return receipt(AdapterOutcome("cancelled", detail="Cancelled during preflight"))
             except InterruptedError as exc:
-                return receipt(AdapterOutcome("cancelled", detail=str(exc)))
+                return receipt(AdapterOutcome("cancelled", detail=str(exc)), dispatched=False)
             except Exception as exc:
-                return receipt(AdapterOutcome("failure", detail=f"{type(exc).__name__}: {exc}"))
+                # Every preflight rejection happens before the adapter is
+                # called, so nothing reached the filesystem or the desktop.
+                return receipt(AdapterOutcome("failure", detail=f"{type(exc).__name__}: {exc}"), dispatched=False)
             task = asyncio.create_task(adapter.execute(request, token))
             cancelled = asyncio.create_task(token.wait())
             self._active[request.adapter_id] = (token, task)
@@ -154,14 +169,17 @@ class BodyRegistry:
                         return receipt(task.result())
                     except Exception:
                         pass
-                return receipt(AdapterOutcome("unknown", detail="Cancellation/deadline after dispatch; completion not verified"))
+                return receipt(AdapterOutcome("unknown", detail="Cancellation/deadline after dispatch; completion not verified"),
+                               dispatched=True)
             except asyncio.CancelledError:
                 token.set()
                 await self._bounded_stop(adapter)
                 task.cancel()
-                return receipt(AdapterOutcome("unknown", detail="Caller cancelled after dispatch; completion not verified"))
+                return receipt(AdapterOutcome("unknown", detail="Caller cancelled after dispatch; completion not verified"),
+                               dispatched=True)
             except Exception as exc:
-                return receipt(AdapterOutcome("unknown", detail=f"Adapter failed after dispatch: {type(exc).__name__}: {exc}"))
+                return receipt(AdapterOutcome("unknown", detail=f"Adapter failed after dispatch: {type(exc).__name__}: {exc}"),
+                               dispatched=True)
             finally:
                 cancelled.cancel()
                 await asyncio.gather(cancelled, return_exceptions=True)

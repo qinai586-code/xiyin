@@ -7,6 +7,7 @@ heard it. A later Body must supply separate playback receipts.
 import asyncio
 from contextlib import aclosing
 from dataclasses import dataclass
+import inspect
 import json
 import logging
 from pathlib import Path
@@ -21,10 +22,12 @@ from .context import compose_messages, memory_receipt_record, retrieved_record
 from .architecture import RuntimeServices
 from .config import Settings, load_settings
 from .experience import ExperienceStore
+from .grounding import action_receipt_record, premise_records, topic_records
 from .lifecycle import RuntimeLease
 from .persona import load_persona
 from .output_guard import OutputGuard, OutputBlocked, VERSION as OUTPUT_GUARD_VERSION
-from .provider import LocalModelClient, ProviderCancelled, ProviderTruncated
+from .provider import GenerationBudget, LocalModelClient, ProviderCancelled, ProviderTruncated
+from .response_plan import ResponsePlan, estimate_tokens, plan_response, updated_rate
 
 
 _logger = logging.getLogger(__name__)
@@ -50,10 +53,20 @@ class XIYINRuntime(RuntimeServices):
         self.store = store
         self.persona = load_persona(settings.persona_path)
         self.provider = provider or LocalModelClient(settings.provider)
+        self._provider_takes_budget = self._accepts_budget(self.provider)
         self._authorize = authorize
         self._active: tuple[str, asyncio.Event] | None = None
         self._lease = None
         self._initialize_services(data_root_id=data_root_id)
+
+    @staticmethod
+    def _accepts_budget(provider) -> bool:
+        try:
+            parameters = inspect.signature(provider.stream).parameters
+        except (TypeError, ValueError):
+            return False
+        return "budget" in parameters or any(p.kind is inspect.Parameter.VAR_KEYWORD
+                                             for p in parameters.values())
 
     @classmethod
     def open(cls, *, model_enabled=True):
@@ -101,20 +114,109 @@ class XIYINRuntime(RuntimeServices):
             return True
         return False
 
-    def _messages(self, text: str, session_id: str, scope: str) -> list[dict]:
-        growth = [m for m in self.store.memories(scope=scope)
-                  if m.get("kind") in {"persona", "preference", "opinion", "relationship"}]
-        history = [{"role": h["role"], "content": h["content"]}
-                   for h in self.store.history(session_id, scope=scope, limit=self.settings.history_messages)]
-        receipts = self.store.operation_receipts(session_id, scope=scope, limit=2)
-        records = [memory_receipt_record(item) for item in reversed(receipts)]
+    def _records(self, text: str, session_id: str, scope: str) -> list[dict]:
+        """Order evidence by how directly it decides this turn's honesty.
+
+        Records are dropped from the tail when the budget runs out, so a
+        premise check and a verified action receipt must come before general
+        lexical recall — those are the ones a wrong answer turns into a false
+        denial or a fabricated experience.
+        """
+        records = list(premise_records(self.store, text, session_id=session_id, scope=scope))
+        for item in reversed(self.store.action_receipts(session_id, scope=scope, limit=3)):
+            record = action_receipt_record(item)
+            if record is not None:
+                records.append(record)
+        # Keep only the newest receipt per memory. A retraction that follows a
+        # save otherwise leaves "saved: completed" standing next to it, and the
+        # stale one reads as the current status of a memory that is now gone.
+        seen_memories = set()
+        for item in reversed(self.store.operation_receipts(session_id, scope=scope, limit=6)):
+            content = item.get("content")
+            key = content.get("memory_id") if isinstance(content, dict) else None
+            if key is not None:
+                if key in seen_memories:
+                    continue
+                seen_memories.add(key)
+            records.append(memory_receipt_record(item))
+            if len(seen_memories) >= 2:
+                break
+        records.extend(topic_records(self.store, text, session_id=session_id, scope=scope))
         for item in self.store.search(text, scope=scope, session_id=session_id, limit=3):
             record = retrieved_record(item)
             if record is not None:
                 records.append(record)
-        return compose_messages(self.persona.system_prompt(growth), text, history, records,
+        return records
+
+    def _prepare(self, text: str, session_id: str, scope: str) -> dict:
+        """Gather everything a turn reads from the ledger, exactly once.
+
+        Planning needs the assembled prompt to size its budget, and the final
+        prompt differs only by one directive line. Composition is pure, so the
+        reads happen here and the two compositions reuse them.
+        """
+        growth = [m for m in self.store.memories(scope=scope)
+                  if m.get("kind") in {"persona", "preference", "opinion", "relationship"}]
+        history = [{"role": h["role"], "content": h["content"]}
+                   for h in self.store.history(session_id, scope=scope, limit=self.settings.history_messages)]
+        return {"persona": self.persona.system_prompt(growth), "history": history,
+                "records": self._records(text, session_id, scope),
+                "facts": self.conversation_facts(session_id, scope)}
+
+    def _compose(self, prepared: dict, text: str, response_directive: str = "") -> list[dict]:
+        return compose_messages(prepared["persona"], text, prepared["history"], prepared["records"],
                                 self.settings.max_context_chars,
-                                runtime_facts=self.conversation_facts(session_id, scope))
+                                runtime_facts=prepared["facts"],
+                                response_directive=response_directive)
+
+    def _messages(self, text: str, session_id: str, scope: str,
+                  *, response_directive: str = "") -> list[dict]:
+        return self._compose(self._prepare(text, session_id, scope), text, response_directive)
+
+    def _plan_turn(self, text: str, messages: list[dict], session_id: str, scope: str) -> ResponsePlan:
+        """Size this turn from the request, the assembled prompt and the machine."""
+        provider = self.settings.provider
+        state = self.store.read_document("state", "generation_profile")
+        measured = state["value"].get("tokens_per_second") if state else None
+        if not isinstance(measured, (int, float)) or isinstance(measured, bool) or measured <= 0:
+            measured = None
+        snapshot = self.store.read_document("state", f"self:xiyin:{scope}:{session_id}")
+        affect = snapshot["value"].get("affect", {}) if snapshot else {}
+        arousal = affect.get("arousal", 0.0)
+        engagement = float(arousal) if isinstance(arousal, (int, float)) and not isinstance(arousal, bool) else 0.0
+        prompt_tokens = sum(estimate_tokens(message["content"]) for message in messages)
+        return plan_response(text, prompt_tokens=prompt_tokens, context_tokens=provider.context_tokens,
+                             ceiling=provider.max_tokens_ceiling,
+                             default_rate=provider.default_tokens_per_second,
+                             max_timeout=provider.max_timeout_seconds,
+                             measured_rate=measured, engagement=engagement)
+
+    def _record_generation_rate(self, text: str, seconds: float) -> None:
+        """Learn this machine's throughput from real completed generations."""
+        state = self.store.read_document("state", "generation_profile")
+        previous = state["value"].get("tokens_per_second") if state else None
+        if not isinstance(previous, (int, float)) or isinstance(previous, bool):
+            previous = None
+        rate = updated_rate(previous, estimate_tokens(text), seconds)
+        if rate is None or rate == previous:
+            return
+        value = {"tokens_per_second": float(rate), "scope": "private",
+                 "samples": int((state["value"].get("samples", 0) if state else 0)) + 1,
+                 "source": "measured_completed_generations"}
+        try:
+            self.store.write_document("state", "generation_profile", value,
+                                      expected_version=state["version"] if state else 0)
+        except Exception:
+            # A losing race just skips one sample; the estimate is advisory.
+            _logger.debug("Generation profile update skipped")
+
+    def _stream_with_budget(self, messages, token, plan):
+        if not self._provider_takes_budget:
+            # A host-supplied provider may predate per-request budgets; it then
+            # runs on the configured defaults rather than failing the turn.
+            return self.provider.stream(messages, token)
+        return self.provider.stream(messages, token,
+                                    budget=GenerationBudget(plan.max_tokens, plan.timeout_seconds))
 
     async def stream_turn(self, text: str, *, session_id: str = "owner", scope: str = "private",
                           cancel: asyncio.Event | None = None):
@@ -142,17 +244,29 @@ class XIYINRuntime(RuntimeServices):
         outcome = "cancelled"
         provider_end = None
         terminal_recorded = False
+        plan = None
+        started = time.monotonic()
+        first_token_at = None
+        first_released_at = None
         try:
-            messages = self._messages(text.strip(), session_id, scope)
-            guard = OutputGuard(text.strip(), persona_prompt=messages[0]["content"])
+            prompt = text.strip()
+            # Plan against the assembled prompt so the budget accounts for the
+            # real context, then recompose with this turn's scope directive.
+            prepared = self._prepare(prompt, session_id, scope)
+            plan = self._plan_turn(prompt, self._compose(prepared, prompt), session_id, scope)
+            messages = self._compose(prepared, prompt, plan.directive)
+            guard = OutputGuard(prompt, persona_prompt=messages[0]["content"])
             self.sleep_controller.wake("user input")
-            evidence_id = self.store.append_event("user", text.strip(), session_id=session_id,
+            evidence_id = self.store.append_event("user", prompt, session_id=session_id,
                                     scope=scope, origin="user_report", status="completed", request_id=request_id)
             self.self_state.observe("user_input", {"event_id": evidence_id}, session_id, scope)
             yield TurnEvent("start", request_id, session_id)
+            started = time.monotonic()
             try:
-                async with aclosing(self.provider.stream(messages, token)) as stream:
+                async with aclosing(self._stream_with_budget(messages, token, plan)) as stream:
                     async for chunk in stream:
+                        if first_token_at is None:
+                            first_token_at = time.monotonic()
                         # Fence both newly received and buffered text. Only checked
                         # units may reach CLI, bridges, or the shared voice body.
                         if token.is_set():
@@ -165,6 +279,8 @@ class XIYINRuntime(RuntimeServices):
                         for segment in guard.feed(chunk):
                             if token.is_set():
                                 raise ProviderCancelled("Turn cancelled")
+                            if first_released_at is None:
+                                first_released_at = time.monotonic()
                             output += segment
                             yield TurnEvent("text_delta", request_id, session_id, segment)
             except (OutputBlocked, ProviderCancelled, asyncio.CancelledError, GeneratorExit):
@@ -178,6 +294,8 @@ class XIYINRuntime(RuntimeServices):
                 for segment in guard.finish():
                     if token.is_set():
                         raise ProviderCancelled("Turn cancelled")
+                    if first_released_at is None:
+                        first_released_at = time.monotonic()
                     output += segment
                     yield TurnEvent("text_delta", request_id, session_id, segment)
                 raise
@@ -187,6 +305,8 @@ class XIYINRuntime(RuntimeServices):
             for segment in guard.finish():
                 if token.is_set():
                     raise ProviderCancelled("Turn cancelled")
+                if first_released_at is None:
+                    first_released_at = time.monotonic()
                 output += segment
                 yield TurnEvent("text_delta", request_id, session_id, segment)
             if token.is_set():
@@ -197,6 +317,9 @@ class XIYINRuntime(RuntimeServices):
                                     origin="generated", status="completed", request_id=request_id)
             terminal_recorded = True
             outcome = "completed"
+            # Only a completed generation measures throughput; a blocked or
+            # cancelled turn says nothing about how fast this machine runs.
+            self._record_generation_rate(raw_output, max(time.monotonic() - started, 1e-6))
             yield TurnEvent("complete", request_id, session_id)
         except OutputBlocked as exc:
             token.set()
@@ -243,6 +366,26 @@ class XIYINRuntime(RuntimeServices):
                     if not terminal_recorded:
                         self.store.append_event("assistant", output, session_id=session_id, scope=scope,
                                                 origin="generated", status="cancelled", request_id=request_id)
+                    if plan is not None:
+                        # Keep the plan and what actually happened together, so
+                        # length adaptation and latency can be measured from the
+                        # ledger instead of judged from one transcript.
+                        self.store.append_event("response_plan", {
+                            **plan.to_dict(), "outcome": outcome,
+                            "released_chars": len(output), "generated_chars": len(raw_output),
+                            "estimated_output_tokens": estimate_tokens(raw_output),
+                            "provider_end": provider_end,
+                            # Three separate instants. The gate buffers whole
+                            # units, so released text lags the first token; and
+                            # neither says anything about audio reaching a person.
+                            "model_first_token_seconds": (round(first_token_at - started, 3)
+                                                          if first_token_at else None),
+                            "first_released_segment_seconds": (round(first_released_at - started, 3)
+                                                               if first_released_at else None),
+                            "generation_seconds": round(time.monotonic() - started, 3),
+                            "audio_playback_measured": False,
+                        }, session_id=session_id, scope=scope, origin="observation",
+                            status="recorded", request_id=request_id)
                     if guard is not None:
                         self.store.append_event("output_guard", {
                             "version": OUTPUT_GUARD_VERSION,

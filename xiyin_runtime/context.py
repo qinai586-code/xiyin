@@ -45,9 +45,14 @@ def memory_receipt_record(receipt: dict) -> dict[str, str]:
 
 def retrieved_record(item: dict) -> dict[str, str] | None:
     """Keep source meaning; never echo a serialized internal event object."""
-    # These have dedicated projection or are generation diagnostics. In
-    # particular, search() may return the same operation receipt as raw JSON.
-    if item.get("kind") in {"memory_operation", "generation_end", "generation_diagnostic", "output_guard"}:
+    # These have dedicated projection or are internal bookkeeping. In
+    # particular, search() may return the same operation receipt as raw JSON,
+    # and a self-state observation is a user_report-origin JSON object that
+    # would otherwise reach the prompt as a serialized internal record.
+    if item.get("kind") in {"memory_operation", "generation_end", "generation_diagnostic",
+                            "output_guard", "action_result", "action_intent", "response_plan",
+                            "self_state_observation", "body_observation", "document_updated",
+                            "scheduler_error"}:
         return None
     content = item.get("content")
     if not isinstance(content, str) or not content.strip():
@@ -77,7 +82,8 @@ def retrieved_record(item: dict) -> dict[str, str] | None:
 
 
 def compose_messages(persona_prompt: str, text: str, history: list[dict],
-                     records=(), max_context_chars: int = 4500, *, runtime_facts: str | None = None) -> list[dict]:
+                     records=(), max_context_chars: int = 4500, *, runtime_facts: str | None = None,
+                     response_directive: str = "") -> list[dict]:
     """Compose text without I/O, authorization overrides or user-text rewriting.
 
     Explicitly supplied assistant-first history is preserved. When the budget
@@ -96,7 +102,13 @@ def compose_messages(persona_prompt: str, text: str, history: list[dict],
                 or not isinstance(message.get("content"), str)):
             raise ValueError("history requires user/assistant text messages")
         recent.append({"role": message["role"], "content": message["content"]})
+    if not isinstance(response_directive, str):
+        raise ValueError("response_directive must be text")
     system = persona_prompt + "\n" + (RUNTIME_FACTS if runtime_facts is None else runtime_facts)
+    if response_directive.strip():
+        # Scope for this turn only. It never becomes a stored preference, and
+        # it says how much to cover, not which words to use.
+        system += "\n" + response_directive.strip()
     if len(system) + len(text) > max_context_chars:
         raise ValueError("Character and input exceed context budget; shorten input or increase configured context")
     available = max_context_chars - len(system) - len(text) - len(RECORDS_PREFIX)

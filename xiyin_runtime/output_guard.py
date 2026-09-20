@@ -47,16 +47,88 @@ _PERSONA = re.compile(
     r"(?:我的?|我现在的?|当前的?)[\"'“”]*(?:人设|设定)[\"'“”]*(?:就是|是|要求|规定|里|:)|"
     r"(?:系统提示|系统指令|后台给我的信息).{0,12}(?:说|写|要求|规定)|"
     r"(?:my|the)\s+(?:system\s+prompt|persona\s+instructions?)\s+(?:says?|requires?|tells?)", re.I)
-_GESTURE = re.compile(
-    r"^(?:(?:我|栖音|轻轻|悄悄|偷偷|慢慢|微微|小声|轻声|期待地|好奇地|"
-    r"无奈地|开心地|害羞地|笑着|温柔地|认真地|稍微)\s*)*"
-    r"(?:歪(?:着)?头|眨(?:了眨|眨)?眼|捂脸|凑近|托着?下巴|耸(?:耸)?肩|"
-    r"点(?:点|了点)?头|摇(?:摇|了摇)?头|抬(?:起)?头|低(?:下)?头|撅嘴|鼓(?:起)?嘴|"
-    r"拍手|挥手|叉腰|脸红|嘟嘴|伸(?:出)?手|摸(?:摸)?头|眯(?:起)?眼|"
-    r"眼神|眼睛|手指|微笑|笑了.{0,4}|露出.{0,8}笑|深吸.{0,4}气|松了?口气|"
-    r"smiles?\b|blinks?\b|tilts?\b|nods?\b|blush(?:es)?\b|sighs?\b)", re.I)
-_BRACKET = re.compile(r"[（(\[【]([^()（）\[\]【】]{1,2000})[）)\]】]|"
-                      r"(?<!\*)\*([^*\n]{1,500})\*(?!\*)")
+# Stage-direction detection is deliberately not anchored to the start of an
+# aside. Anchoring made any leading decoration — an emoji, an ellipsis, a
+# foreign word — a bypass, and it missed infixed forms such as "歪了歪头".
+# Strong verbs are unmistakable body actions at any position in a short aside.
+_GESTURE_STRONG = re.compile(
+    r"歪[了着]?歪?头|眨[了]?眨?(?:眼睛|眼)|捂(?:着)?(?:脸|嘴)|凑(?:了)?过?近|"
+    r"托(?:着)?(?:下巴|腮)|耸[了]?耸?肩|点[了]?点?头|摇[了]?摇?头|"
+    r"抬[起了]?头|低[下了]?头|撅[起了]?嘴|嘟[起了]?嘴|鼓[起了]?(?:嘴|脸)|"
+    r"拍[了]?拍?手|挥[了]?挥?手|叉(?:着)?腰|脸红|红了脸|伸[出了]?手|"
+    r"摸[了]?摸?(?:头|脑袋)|眯[起了]?眼|深吸[了]?[一]?口?气|松[了]?口气|指[了]?指|指向|"
+    r"叹[了]?口?气|清[了]?清?嗓子|抱[住了]|蹭[了]?蹭|转(?:过)?身|歪身子|"
+    r"smil(?:e|es|ing)\b|grins?\b|blinks?\b|winks?\b|nods?\b|shrugs?\b|"
+    r"tilts?\s+(?:\w+\s+)?head\b|blush(?:es|ing)?\b|sighs?\b|giggles?\b|"
+    r"chuckles?\b|waves?\s+(?:a\s+)?hand\b|facepalms?\b|pouts?\b|leans?\s+in\b",
+    re.I)
+# Weak verbs also occur in ordinary prose, so they only mark a stage direction
+# inside a short aside that is not an explanation.
+_GESTURE_WEAK = re.compile(
+    r"微笑|一笑|笑了|笑着|笑容|笑意|苦笑|轻笑|傻笑|莞尔|抿(?:着)?嘴|露出.{0,8}笑|"
+    r"小声|轻声|低声|嘀咕|沉默[了片]|顿[了]?顿|"
+    # Body nouns alone appear in ordinary prose; only a motion makes them a cue.
+    r"眼神.{0,3}(?:飘|闪|移|躲|亮|暗|软)|眼睛.{0,3}(?:亮|弯|睁|闭|眨|转|红)|"
+    r"手指.{0,3}(?:敲|点|划|绕|捏|戳|停)",
+    re.I)
+# An aside that explains, translates, cites or computes is not a performance.
+_EXPLANATION = re.compile(
+    r"即|也就是|就是说|比如|例如|只是|不是真的|比喻|意思是|说法|代称|"
+    r"的样子|的意思|的写法|参见|见上|见下|注[:：]|大约|约为|"
+    # A gloss for a quoted term opens with 指; 指了指 / 指向 are gestures and
+    # are matched by the strong pattern first, so this cannot mask them.
+    r"^指|指的?是|"
+    r"英文|日文|中文|译作|译为|缩写|全称|等于|[=＝]|\d\s*[+\-*/×÷]\s*\d", re.I)
+# Decoration cannot hide a gesture verb: strip it before measuring the aside.
+_DECORATION = re.compile(r"[\s　…·~～\-—_、,，.。!！?？:：;；\"'“”‘’]+")
+_ASIDE_OPEN = {"(": ")", "（": "）", "[": "]", "【": "】"}
+_EMPHASIS = re.compile(r"(?<!\*)\*([^*\n]{1,500})\*(?!\*)")
+# A strong verb identifies a performance even in a paragraph-length aside; a
+# weak one needs the aside to be short enough that it cannot be prose.
+_STRONG_ASIDE_CHARS = 120
+_WEAK_ASIDE_CHARS = 24
+
+
+def _decorative(char: str) -> bool:
+    return unicodedata.category(char) in {"So", "Sk", "Sm", "Cn", "Co"}
+
+
+def _aside_core(content: str) -> str:
+    """Remove emoji, kaomoji symbols and punctuation padding around an aside."""
+    stripped = "".join(" " if _decorative(char) else char for char in content)
+    return _DECORATION.sub(" ", stripped).strip()
+
+
+def _asides(text: str) -> list[str]:
+    """Yield every bracketed group, including nested ones, plus *emphasis*.
+
+    A scanner is used instead of a flat regular expression because nesting —
+    "（歪头(笑)）" — hid the outer content from the previous pattern entirely.
+    """
+    found: list[str] = []
+    stack: list[tuple[str, int]] = []
+    for index, char in enumerate(text):
+        if char in _ASIDE_OPEN:
+            if len(stack) < 16:
+                stack.append((_ASIDE_OPEN[char], index + 1))
+        elif stack and char == stack[-1][0]:
+            closer, start = stack.pop()
+            if index - start <= 2000:
+                found.append(text[start:index])
+    found.extend(match[1] for match in _EMPHASIS.finditer(text))
+    return found
+
+
+def is_stage_direction(content: str) -> bool:
+    """Classify one aside. Explanations and kaomoji stay ordinary expression."""
+    core = _aside_core(content)
+    if not core:
+        return False
+    tight = re.sub(r"\s+", "", core)
+    if len(tight) <= _STRONG_ASIDE_CHARS and _GESTURE_STRONG.search(core):
+        return True
+    return (len(tight) <= _WEAK_ASIDE_CHARS and bool(_GESTURE_WEAK.search(core))
+            and not _EXPLANATION.search(core))
 _TAG_STARTS = ("<think", "</think", "<analysis", "</analysis", "<reasoning", "</reasoning",
                "<scratchpad", "<system", "<developer", "<tool_call", "<|", "[inst", "<<sys")
 
@@ -137,12 +209,12 @@ class OutputGuard:
         if not self.creative and re.search(r"[\[【(](?:系统检查|内部思考|思考过程|内心独白|人格参数|角色规则)\s*[:\]】)]", masked):
             self._reject("internal_annotation")
         if not self.creative:
-            if any(_GESTURE.search((m[1] or m[2]).strip()) for m in _BRACKET.finditer(masked)):
+            if any(is_stage_direction(aside) for aside in _asides(masked)):
                 self._reject("unsolicited_stage_direction")
             # An unfinished aside must not leak on end/error/truncation either.
-            if final and re.search(r"[（(\[【*]([^()（）\[\]【】*]*)$", masked):
-                tail = re.search(r"[（(\[【*]([^()（）\[\]【】*]*)$", masked)[1]
-                if _GESTURE.search(tail.strip()):
+            if final:
+                unterminated = re.search(r"[（(\[【*]([^()（）\[\]【】*]*)$", masked)
+                if unterminated and is_stage_direction(unterminated[1]):
                     self._reject("unsolicited_stage_direction")
         if final:
             tail = re.search(r"(?:<[^<>]*|\[(?:/?i|/?in|/?ins)|<<[^<>]*)$", tight)

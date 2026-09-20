@@ -87,6 +87,13 @@ class RuntimeServices:
             activity = state["value"].get("activity", "idle")
             labels = {"idle": "空闲", "conversation": "交流", "rest": "休息", "stopped": "已停止"}
             facts += "\n当前活动：" + labels.get(activity, activity) + "。运行状态仅作当前背景，不用向对方逐项汇报。"
+        # Attention, mood and footing reach expression here. The projection is
+        # read-only and falls back to starting values, so the first turn of a
+        # session carries the same kind of context as every later one.
+        try:
+            facts += "\n" + self.self_state.disposition(session_id, scope)["line"]
+        except Exception:
+            pass
         return facts
 
     async def emergency_stop(self, reason="owner requested stop"):
@@ -245,7 +252,15 @@ class RuntimeServices:
         if adapter_id not in capabilities:
             raise ValueError("Body adapter is not registered")
         # Host registry supplies scope, never the model's proposed filesystem path.
-        observation_id = payload.get("observation_id")
+        # Recent verified failures lower `control`; that state makes her look
+        # again instead of reusing a supplied observation. This only ever adds
+        # verification, so a bad appraisal cannot loosen an action.
+        try:
+            caution = self.self_state.disposition(session, scope)["caution"]
+        except Exception:
+            caution = False
+        observation_id = None if caution else payload.get("observation_id")
+        reobserved = caution and bool(payload.get("observation_id"))
         if not observation_id:
             observation_id = (await self.body.observe(adapter_id)).observation_id
         strategy = self.lab.active_strategy()
@@ -255,7 +270,8 @@ class RuntimeServices:
                                 expected_window=payload.get("expected_window"))
         # Write an intent before dispatch. A crash after this event does not imply success.
         self.store.append_event("action_intent", {"action_id": request.action_id, "adapter_id": adapter_id,
-                                                  "operation": request.operation}, session_id=session,
+                                                  "operation": request.operation,
+                                                  "reobserved_after_failure": reobserved}, session_id=session,
                                 scope=scope, origin="observation", status="recorded")
         token = cancel if cancel is not None else asyncio.Event()
         watcher = asyncio.create_task(self.watch_stop(token))
@@ -363,6 +379,14 @@ class RuntimeServices:
         self.sleep_controller.settle()
         result = await asyncio.to_thread(self.sleep_controller.consolidate, session, scope)
         if not result["interrupted"] and self.sleep_controller.state()["phase"] == "settling":
+            # Consolidation is where feedback already on record becomes growth.
+            # It runs only on an uninterrupted pass, so foreground input is
+            # never waiting behind it, and every change stays rolled back-able.
+            try:
+                result = dict(result, growth=self.director.review_feedback_growth(session, scope))
+            except Exception as exc:
+                self.store.append_event("growth_review_error", {"error": type(exc).__name__},
+                                        session_id=session, scope=scope, origin="observation", status="failed")
             self.sleep_controller.sleep()
             self.self_state.observe("rest", {}, session, scope)
         return result

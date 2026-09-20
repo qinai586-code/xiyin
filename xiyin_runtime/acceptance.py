@@ -41,9 +41,44 @@ async def exercise_runtime(runtime, workspace):
         "arguments": {"path": "after-rollback.txt", "text": "x" * 20}}))
     if allowed["status"] != "success":
         raise AssertionError("Previous executable strategy was not restored")
+    # The receipts above must be reachable by a conversation turn. This is the
+    # assembly the Windows report found missing: the write was verified on
+    # disk and then denied in conversation, because no projection existed.
+    grounded = runtime._records("刚才那个文件写好了吗", "owner", "private")
+    if not any(record.get("来源") == "动作执行回执" and record.get("结果") == "已执行并通过独立校验"
+               for record in grounded):
+        raise AssertionError("A verified action receipt did not reach conversation context")
+    if not any(record.get("来源") == "动作执行回执" and record.get("结果") == "没有执行（在派发前被拒绝）"
+               for record in runtime._records("刚才失败的那步呢", "owner", "private")):
+        raise AssertionError("A rejected action was not distinguishable from a dispatched one")
+    premise = runtime._records("你刚才说过你已经把所有文件都删掉了", "owner", "private")
+    if not any(record.get("结果") == "没有找到相符的内容" for record in premise):
+        raise AssertionError("An unsupported premise was not checked against the ledger")
+    absent = runtime._records("你和祈奈一起做过什么？", "owner", "private")
+    if not any(record.get("主题") == "与祈奈相关的记录" and record.get("已保存的长期记忆") == "0 条"
+               for record in absent):
+        raise AssertionError("An empty shared-experience record was not stated as empty")
+    brief = runtime._plan_turn("简短说一下", runtime._messages("简短说一下", "owner", "private"),
+                               "owner", "private")
+    detailed = runtime._plan_turn("详细讲讲这个机制是怎么工作的",
+                                  runtime._messages("详细讲讲这个机制是怎么工作的", "owner", "private"),
+                                  "owner", "private")
+    if not brief.max_tokens < detailed.max_tokens or detailed.max_tokens <= 512:
+        raise AssertionError("Generation budget did not adapt to the request")
+
+    feedback_growth = {"kind": "preference", "subject": "expression:private",
+                       "statement": "验收：私下可以更直接一点。"}
+    await runtime.dispatch(InputEvent("feedback", {"rating": 1, "growth": feedback_growth}))
     sleep = await runtime.dispatch(InputEvent("sleep"))
     if sleep["interrupted"] or runtime.sleep_controller.state()["phase"] != "sleeping":
         raise AssertionError("Sleep checkpoint was not completed")
+    if [item["status"] for item in sleep.get("growth", [])] != ["adopted"]:
+        raise AssertionError("Feedback already on record did not become adopted growth")
+    if feedback_growth["statement"] not in runtime.persona.system_prompt(runtime.store.memories()):
+        raise AssertionError("Adopted growth did not reach the character projection")
+    await runtime.dispatch(InputEvent("rollback_growth", {"candidate_id": sleep["growth"][0]["id"]}))
+    if feedback_growth["statement"] in runtime.persona.system_prompt(runtime.store.memories()):
+        raise AssertionError("Growth rollback did not restore the previous projection")
     await runtime.dispatch(InputEvent("wake"))
     if runtime.sleep_controller.state()["phase"] != "awake":
         raise AssertionError("Wake failed")
@@ -58,7 +93,10 @@ async def exercise_runtime(runtime, workspace):
     identity = runtime.self_state.persistent_id
     return {"memory_id": corrected["memory_id"], "character_identity": identity,
             "goal_id": goal["id"], "checks": ["memory_correction", "verified_file_actions", "goal_scheduling",
-                "strategy_adoption_affects_execution", "strategy_rollback", "sleep_checkpoint", "wake", "stop_resume"]}
+                "strategy_adoption_affects_execution", "strategy_rollback", "sleep_checkpoint", "wake", "stop_resume",
+                "action_receipt_reaches_conversation", "rejection_distinct_from_dispatch",
+                "unsupported_premise_checked", "absent_shared_experience_stated",
+                "response_budget_adapts", "feedback_becomes_growth", "growth_rollback_restores_projection"]}
 
 
 async def verify_native():

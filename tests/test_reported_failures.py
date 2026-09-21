@@ -444,6 +444,34 @@ class ResponseBudgetTests(RuntimeCase):
         self.assertIn("OutputBlocked", events[-1].detail)
         self.assertIsNone(self.store.read_document("state", "generation_profile"))
 
+    def test_the_turn_directive_cannot_be_spoken_as_her_own_words(self):
+        # The directive is text this runtime wrote into the prompt. Parroting
+        # it back is internal leakage, and the keyword heuristic that catches
+        # persona-rule echo did not match it, so it was being delivered.
+        from xiyin_runtime.response_plan import _DIRECTIVE
+        for scale in ("minimal", "brief", "detailed", "extended"):
+            directive = _DIRECTIVE[scale]
+            for text in (directive, directive.split("：", 1)[-1]):
+                with self.subTest(scale=scale, text=text[:20]):
+                    guard = OutputGuard("简短说一下", persona_prompt="你是栖音。\n" + directive,
+                                        turn_directive=directive)
+                    with self.assertRaises(OutputBlocked) as caught:
+                        guard.feed(text)
+                        guard.finish()
+                    self.assertEqual(caught.exception.reason, "instruction_echo")
+
+    def test_her_own_words_about_being_brief_are_not_blocked(self):
+        from xiyin_runtime.response_plan import _DIRECTIVE
+        directive = _DIRECTIVE["brief"]
+        for text in ("好，我尽量说简单点：主要是文字交流和记录读取。",
+                     "今天没什么特别的安排，下午想把那个解谜关卡打完。",
+                     "这个机制分三步：先看请求里有没有明确说长短，再看任务需要多少。"):
+            with self.subTest(text=text[:16]):
+                guard = OutputGuard("简短说一下", persona_prompt="你是栖音。\n" + directive,
+                                    turn_directive=directive)
+                delivered = "".join(guard.feed(text) + guard.finish())
+                self.assertEqual(delivered, text)
+
     async def test_the_directive_does_not_become_a_stored_preference(self):
         provider = ScriptedProvider()
         runtime = self.runtime(provider)

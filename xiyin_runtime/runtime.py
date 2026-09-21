@@ -255,7 +255,8 @@ class XIYINRuntime(RuntimeServices):
             prepared = self._prepare(prompt, session_id, scope)
             plan = self._plan_turn(prompt, self._compose(prepared, prompt), session_id, scope)
             messages = self._compose(prepared, prompt, plan.directive)
-            guard = OutputGuard(prompt, persona_prompt=messages[0]["content"])
+            guard = OutputGuard(prompt, persona_prompt=messages[0]["content"],
+                                turn_directive=plan.directive)
             self.sleep_controller.wake("user input")
             evidence_id = self.store.append_event("user", prompt, session_id=session_id,
                                     scope=scope, origin="user_report", status="completed", request_id=request_id)

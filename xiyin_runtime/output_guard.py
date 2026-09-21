@@ -137,7 +137,7 @@ class OutputGuard:
     # This is a per-unit buffer bound, not a reply-length/style target.
     MAX_PENDING = 20000
 
-    def __init__(self, user_text: str, *, persona_prompt: str = ""):
+    def __init__(self, user_text: str, *, persona_prompt: str = "", turn_directive: str = ""):
         self.pending = ""
         self.user = normalized(user_text)
         self.blocked = None
@@ -168,6 +168,17 @@ class OutputGuard:
             if len(value) >= 20 and re.search(r"(?:无需|不要|不必|不得|要求|允许|默认|逐轮|本轮|优先|不是|不自动|不编造)", value):
                 if value not in compact(user_text):
                     self.echoes.append(value)
+        # The turn's scope directive is text this runtime wrote, so register it
+        # outright rather than hoping the keyword heuristic above happens to
+        # match it — it did not, and a verbatim parrot was being delivered as
+        # if it were her own words. Both the whole line and the part after the
+        # framing colon are registered, so dropping the prefix is not a way
+        # through. Paraphrase in her own words stays allowed: only substantial
+        # verbatim text is caught.
+        for candidate in (turn_directive, turn_directive.split("：", 1)[-1]):
+            value = compact(candidate)
+            if len(value) >= 12 and value not in compact(user_text) and value not in self.echoes:
+                self.echoes.append(value)
 
     def _reject(self, reason):
         self.blocked = reason

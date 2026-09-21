@@ -139,7 +139,7 @@ class StreamOutcomeTests(unittest.TestCase):
                 events = asyncio.run(self.collect(runtime))
                 self.assertEqual([item.type for item in events], ["start", "text_delta", "error"])
                 self.assertEqual("".join(item.text for item in events), expected)
-                self.assertIn(detail, events[-1].detail)
+                self.assertEqual("ProviderError: local model request failed", events[-1].detail)
                 reply = self.reply_record(runtime, events[0].request_id)
                 self.assertEqual((reply["content"], reply["status"]), (expected, "failed"))
                 self.assertFalse(any(row["role"] == "assistant" for row in runtime.store.history("owner")))

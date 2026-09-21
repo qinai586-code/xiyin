@@ -265,26 +265,26 @@ class FalsePremiseTests(RuntimeCase):
                 self.assertIn("没有找到相符的内容", prompt)
                 self.assertIn("不要顺着确认", prompt)
 
-    async def test_a_supported_claim_is_confirmed_with_the_original_wording(self):
-        provider = ScriptedProvider()
+    async def test_an_assistant_quote_matches_the_actual_assistant_wording(self):
+        provider = ScriptedProvider(("今晚想看星星。",))
         runtime = self.runtime(provider)
         await self.ask(runtime, "今晚想看星星。")
         await self.ask(runtime, "你刚才说过「今晚想看星星」对吧")
         prompt = provider.system_prompt
-        self.assertIn("记录中有相符的内容", prompt)
+        self.assertIn("EXACT_UTTERANCE", prompt)
         self.assertIn("今晚想看星星", prompt)
-        self.assertIn("用户", prompt)
+        self.assertIn('"说话者":"栖音"', prompt)
 
     async def test_a_negated_claim_is_not_confirmed_by_the_positive_record(self):
-        # Term overlap cannot see polarity: "今晚想看星星" and "今晚不想看星星"
-        # share every bigram but one. Confirming the second from the first
-        # would be the reported failure with extra confidence behind it.
+        # Lexical overlap retrieves a candidate; it cannot decide either
+        # semantic equivalence or contradiction, including negation scope.
         provider = ScriptedProvider()
         runtime = self.runtime(provider)
         await self.ask(runtime, "今晚想看星星。")
         await self.ask(runtime, "你刚才说过今晚不想看星星")
         prompt = provider.system_prompt
-        self.assertIn("肯定/否定与这句话相反", prompt)
+        self.assertIn("CANDIDATES_ONLY", prompt)
+        self.assertIn('"语义判断":"UNKNOWN"', prompt)
         self.assertIn("今晚想看星星", prompt)
         self.assertNotIn("记录中有相符的内容", prompt)
         # The invariant across phrasings is that a negated claim is never
@@ -306,12 +306,13 @@ class FalsePremiseTests(RuntimeCase):
         self.assertIn("没有找到相符的内容", prompt)
         self.assertNotIn("记录中有相符的内容", prompt)
 
-    async def test_matching_polarity_still_confirms(self):
+    async def test_matching_polarity_does_not_confirm_a_different_speaker(self):
         provider = ScriptedProvider()
         runtime = self.runtime(provider)
         await self.ask(runtime, "今晚不想看星星。")
         await self.ask(runtime, "你刚才说过今晚不想看星星吧")
-        self.assertIn("记录中有相符的内容", provider.system_prompt)
+        self.assertIn("CANDIDATES_ONLY", provider.system_prompt)
+        self.assertNotIn("EXACT_UTTERANCE", provider.system_prompt)
 
     async def test_a_claim_too_short_to_match_is_left_undecided(self):
         # Confirming on one generic word would repeat the reported failure in

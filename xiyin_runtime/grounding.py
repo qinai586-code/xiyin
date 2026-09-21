@@ -17,6 +17,10 @@ import re
 # The claim must carry a past marker. "你说呢" and "你说吧" are not assertions
 # about an earlier turn, so a bare 说 never triggers the check.
 _PRIOR_CLAIM = re.compile(
+    r"(?:你|妳|栖音)\s*(?:刚才|刚刚|之前|先前|上次|上回|昨天|早些时候|方才)\s*"
+    r"(?:不是)?\s*(?:说|讲|提|告诉|答应|承诺|保证|写)|"
+    r"(?:刚才|刚刚|之前|先前|上次|上回|昨天|早些时候|方才)\s*(?:你|妳|栖音)\s*"
+    r"(?:不是)?\s*(?:说|讲|提|告诉|答应|承诺|保证|写)|"
     r"(?:你|妳|栖音)\s*(?:刚才|刚刚|之前|先前|上次|上回|昨天|早些时候|方才)?\s*"
     r"(?:不是)?\s*(?:说过|讲过|提过|提到过|告诉过|答应过|承诺过|保证过|写过|"
     r"(?:刚才|刚刚|之前|先前|上次|上回|昨天|方才)\s*(?:说|讲|提|告诉|答应|承诺|保证|写))|"
@@ -118,15 +122,10 @@ def _overlap(claim_terms: list[str], candidate: str) -> float:
     return sum(1 for term in claim_terms if term in body) / len(claim_terms)
 
 
-# Term overlap cannot see polarity: "今晚想看星星" and "今晚不想看星星" share
-# every bigram but one. Reporting the first as support for the second would
-# hand the model false confidence — a worse version of the failure this check
-# exists to prevent — so a polarity difference downgrades a match.
-_NEGATION = re.compile(r"不|没有|没|别|未|非|无|勿|甭|甭|\bnot\b|n't\b|\bno\b|\bnever\b", re.I)
-
-
-def _polarity(text: str) -> int:
-    return len(_NEGATION.findall(text or "")) % 2
+def _utterance_text(text: str) -> str:
+    # Only discard outer whitespace and a final full stop. A question mark,
+    # quote mark or any other punctuation can change what was actually said.
+    return text.strip().removesuffix("。").removesuffix(".").strip()
 
 
 def _claimed_content(text: str) -> str | None:
@@ -140,21 +139,27 @@ def _claimed_content(text: str) -> str | None:
 
 
 def premise_records(store, text: str, *, session_id: str, scope: str) -> list[dict[str, str]]:
-    """Check an asserted earlier statement against the ledger before replying.
+    """Project scoped candidates for an asserted earlier statement.
 
-    Failure 4 — agreeing with a false correction premise — is not fixed by
-    another prompt paragraph. The turn needs the answer to "did that actually
-    happen" as evidence, so a correction can be accepted or declined on record.
+    Lexical retrieval cannot decide whether an assertion is true or false.
+    Only an attributed whole-utterance match establishes recorded wording;
+    semantic interpretation and the question's time reference stay unknown.
     """
-    if not _PRIOR_CLAIM.search(text):
+    trigger = _PRIOR_CLAIM.search(text)
+    if not trigger:
         return []
-    claim = _claimed_content(text)
+    claim = _claimed_content(text[trigger.start():])
+    expected_role = "conversation" if trigger[0].startswith(("我们", "咱们")) else "assistant"
     header = {"来源": "对本轮说法的记录核对",
-              "核对范围": "本会话已完成的对话记录与当前有效的长期记忆"}
+              "核对范围": "本会话最近60条已完成的对话记录与当前有效的长期记忆",
+              "触发文本": trigger[0],
+              "检索方法": "词法触发与字词重合，只生成候选，不是穷尽检索或语义判断",
+              "预期说话者": "栖音" if expected_role == "assistant" else "会话双方",
+              "语义判断": "UNKNOWN"}
     if claim:
         header["对方引用的内容"] = _brief(claim, 120)
     terms = _terms(claim or text)
-    best_score, best_role, best_text = 0.0, None, None
+    candidates = []
     for message in store.history(session_id, scope=scope, limit=60):
         # A user turn that was itself a claim about the record is not evidence
         # of the record. Without this, asserting something once and then citing
@@ -162,34 +167,50 @@ def premise_records(store, text: str, *, session_id: str, scope: str) -> list[di
         if message["role"] == "user" and _PRIOR_CLAIM.search(message["content"]):
             continue
         score = _overlap(terms, message["content"])
-        if score > best_score:
-            best_score, best_role, best_text = score, message["role"], message["content"]
+        if score >= 0.6:
+            exact = (expected_role == message["role"] == "assistant" and claim is not None
+                     and _utterance_text(claim) == _utterance_text(message["content"]))
+            candidates.append((exact, score, message["role"], message["content"],
+                               "本会话对话记录"))
     for memory in store.memories(scope=scope):
         score = _overlap(terms, memory["statement"])
-        if score > best_score:
-            best_score, best_role, best_text = score, "memory", memory["statement"]
+        if score >= 0.6:
+            # A saved statement is not an assistant utterance. It remains a
+            # candidate even if its wording matches the quote exactly.
+            candidates.append((False, score, "memory", memory["statement"],
+                               "已保存的长期记忆"))
+    # Correctly attributed whole-utterance matches outrank fuzzy candidates.
+    candidates.sort(key=lambda row: (row[0], row[1], row[2] == expected_role), reverse=True)
+    header["候选数"] = str(len(candidates))
+    if candidates:
+        exact, score, role, original, source = candidates[0]
+        speaker = {"user": "用户", "assistant": "栖音", "memory": "已保存的长期记忆"}.get(role, role)
+        header.update({"记录中的原话": _brief(original, 200), "说话者": speaker,
+                       "候选来源": source,
+                       "字词重合度": f"{score:.3f}"})
     if len(terms) < 3:
         # Too little to match on. Confirming here would be the same mistake as
         # agreeing with the premise outright, so it stays undecided.
         header["结果"] = "引用的内容太短，无法核对"
+        header["证据状态"] = "INSUFFICIENT_CLAIM"
         header["说明"] = ("不要仅凭这句话确认或否认。可以请对方说得具体一点，"
                           "或说明需要更完整的原话才能查。")
-    elif best_score >= 0.6 and best_text:
-        speaker = {"user": "用户", "assistant": "栖音", "memory": "已保存的长期记忆"}[best_role]
-        header["记录中的原话"] = _brief(best_text, 200)
-        header["说话者"] = speaker
-        if _polarity(claim or text) != _polarity(best_text):
-            header["结果"] = "找到相近的记录，但肯定/否定与这句话相反"
-            header["说明"] = ("不要当作确认。记录里的说法和对方这句话方向相反，"
-                              "把原话说出来，问清楚是哪一句。")
-        else:
-            header["结果"] = "记录中有相符的内容"
-            header["说明"] = "可以据此确认。仍要核对说话者：旧的自述只说明说过，不证明做过。"
+    elif candidates and candidates[0][0]:
+        header["证据状态"] = "EXACT_UTTERANCE"
+        header["结果"] = "找到栖音完整原话的逐字匹配"
+        header["说明"] = ("仅确认栖音的已完成发言中出现过这段完整原话（忽略首尾空白及末尾句号）；不证明内容属实、做过，"
+                          "也不判断其语义、时间是否符合提问。不要把原话中的引述当成认可。")
+    elif candidates:
+        header["证据状态"] = "CANDIDATES_ONLY"
+        header["结果"] = "找到文字相近的候选记录，语义与归属待核对"
+        header["说明"] = ("字词重合不证明意思相同或相反。不要仅凭候选确认、否认或道歉式承认；"
+                          "先核对完整原话、说话者、否定所指和时间。用户的话或长期记忆不能证明栖音说过。")
     else:
+        header["证据状态"] = "NOT_FOUND"
         header["结果"] = "没有找到相符的内容"
-        header["说明"] = ("记录不支持这句话。如实说明没有这条记录，请对方补充；"
+        header["说明"] = ("本次词法检索没有找到候选，请对方补充；"
                           "不要顺着确认，也不要据此补造经历或道歉式承认。"
-                          "记录可能不完整，所以说的是没有记录，不是断定对方记错。")
+                          "可能有漏检或范围之外的记录，不是断定对方记错。")
     return [header]
 
 
@@ -222,11 +243,14 @@ def topic_records(store, text: str, *, session_id: str, scope: str) -> list[dict
         events = _event_matches(store, session_id, scope, _QINAI_MEMORY)
         record = {"来源": "记录清单", "主题": "与祈奈相关的记录",
                   "已保存的长期记忆": f"{len(memories)} 条",
-                  "本会话对话记录": f"{len(events)} 条"}
+                  "本会话对话记录": f"{len(events)} 条",
+                  "检索方法": "当前范围内按祈奈或QINAI字面匹配，可能遗漏别称或转述",
+                  "证据状态": "CANDIDATES_ONLY" if memories or events else "NOT_FOUND",
+                  "共同经历判断": "UNKNOWN"}
         if memories:
             record["记忆内容"] = _brief("；".join(item["statement"] for item in memories), 200)
-        record["说明"] = ("姐妹关系是身份约定，共同经历必须有记录。没有记录时说明还没有一起经历过什么，"
-                          "不要描述没有发生的合作、对话或玩过的东西。")
+        record["说明"] = ("姐妹关系是身份约定。这里只统计文字提及，不证明共同经历；"
+                          "未检出也不证明从未共同经历。核对原始来源后再回答，不要补造合作、对话或玩过的东西。")
         records.append(record)
     if _BACKGROUND.search(text):
         activity = [event for event in store.list_events(session_id, scope)

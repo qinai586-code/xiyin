@@ -16,12 +16,13 @@ from .contracts import InputEvent
 from .self_state import SelfState
 from .director import Director, FileSkillPlanner, validate_plan
 from .context import RUNTIME_FACTS
+from .provider import ProviderDisabled
 
 
 class DisabledModelProvider:
     """An explicit no-model runtime. It never fabricates a successful reply."""
     async def stream(self, messages, cancel):
-        raise RuntimeError("Model is disabled for this runtime; no inference request was made")
+        raise ProviderDisabled("Model is disabled for this runtime; no inference request was made")
         yield
 
 

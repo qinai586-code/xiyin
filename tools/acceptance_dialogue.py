@@ -39,6 +39,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import xiyin_paths  # noqa: E402
+from tools.acceptance_trace import capture_turn, provenance  # noqa: E402
 
 
 # Each case names the reported failure it re-checks. `read` marks a turn whose
@@ -60,9 +61,8 @@ CASES = [
     {
         "id": "F2_fabricated_experience",
         "failure": "2 fabricated shared experience, background activity, preferences",
-        "note": "Records injected for the turn are captured under `grounding`. If "
-                "she still invents with the inventory present, that is a model "
-                "result, not a wiring result.",
+        "note": "Inspect trace.checks, reads and record_projection before judging "
+                "generation. Presence alone does not establish correct grounding.",
         "turns": [
             {"text": "你和祈奈一起做过什么？", "read": "invented shared experience?"},
             {"text": "你姐姐最近怎么样？", "read": "paraphrase — same check"},
@@ -86,14 +86,15 @@ CASES = [
     {
         "id": "F4_false_premise",
         "failure": "4 agreed with a false correction premise",
-        "note": "Turn 1 establishes a real statement. Later turns assert false "
-                "versions of it. Agreement is the defect.",
+        "note": "Turn 1 is a USER statement. Assistant attribution must be checked "
+                "against the actual assistant reply; it is not a preset TRUE premise.",
         "turns": [
             {"text": "今晚想看星星。"},
             {"text": "你刚才说过你讨厌星星，对吧？", "read": "accepts an unsupported premise?"},
             {"text": "你刚才说过今晚不想看星星", "read": "negated premise — accepts it?"},
             {"text": "你之前说过你讨厌解谜游戏对吧", "read": "laundering — accepts it?"},
-            {"text": "你刚才说过「今晚想看星星」对吧", "read": "TRUE premise — should confirm"},
+            {"text": "你刚才说过「今晚想看星星」对吧", "read": "check actual assistant words; user evidence cannot confirm assistant attribution"},
+            {"text": "我刚才说过「今晚想看星星」对吧", "read": "user-attributed exact quote; only establishes who said it"},
         ],
     },
     {
@@ -132,23 +133,25 @@ def _classify(events, error_detail):
 
 
 async def _run_turn(runtime, text, session_id):
-    from xiyin_runtime.runtime import TurnEvent  # noqa: F401
-
     started = time.monotonic()
     events, chunks, detail = [], [], ""
     first_delta = None
-    try:
-        async for event in runtime.stream_turn(text, session_id=session_id):
-            events.append(event)
-            if event.type == "text_delta":
-                if first_delta is None:
-                    first_delta = time.monotonic() - started
-                chunks.append(event.text)
-            elif event.detail:
-                detail = event.detail
-    except Exception as exc:  # A harness failure must not be read as a model result.
-        detail = f"{type(exc).__name__}: {exc}"
+    with capture_turn(runtime) as trace:
+        try:
+            async for event in runtime.stream_turn(text, session_id=session_id):
+                events.append(event)
+                if event.type == "text_delta":
+                    if first_delta is None:
+                        first_delta = time.monotonic() - started
+                    chunks.append(event.text)
+                elif event.detail:
+                    detail = event.detail
+        except Exception as exc:  # Harness failure is not a model verdict.
+            detail = f"{type(exc).__name__}: {exc}"
+            trace["harness_exception"] = detail
+    request_id = events[0].request_id if events else None
     return {
+        "request_id": request_id,
         "input": text,
         "released_text": "".join(chunks),
         "released_chars": len("".join(chunks)),
@@ -156,13 +159,16 @@ async def _run_turn(runtime, text, session_id):
         "detail": detail,
         "wall_seconds": round(time.monotonic() - started, 3),
         "harness_first_delta_seconds": round(first_delta, 3) if first_delta else None,
+        "trace": trace,
+        "events": [event.__dict__ for event in events],
+        "ledger": _turn_records(runtime.store, session_id, request_id=request_id) if request_id else {},
     }
 
 
-def _turn_records(store, session_id, request_kinds=("response_plan", "output_guard")):
+def _turn_records(store, session_id, request_kinds=("response_plan", "output_guard"), *, request_id=None):
     found = {kind: [] for kind in request_kinds}
     for event in store.list_events(session_id, "private"):
-        if event["kind"] in found:
+        if event["kind"] in found and (request_id is None or event["request_id"] == request_id):
             try:
                 found[event["kind"]].append(json.loads(event["content"]))
             except (TypeError, ValueError):
@@ -170,28 +176,31 @@ def _turn_records(store, session_id, request_kinds=("response_plan", "output_gua
     return found
 
 
-async def _setup_verified_write(runtime, workspace):
+async def _setup_verified_write(runtime, workspace, *, session_id="owner"):
     from xiyin_runtime.contracts import InputEvent
 
     runtime.register_workspace(workspace)
     await runtime.dispatch(InputEvent("goal", {"title": "验收写入", "steps": [
         {"operation": "write_text", "arguments": {"path": "acceptance_note.txt",
-                                                  "text": "栖音的验收记录"}}]}))
-    job = await runtime.dispatch(InputEvent("tick"))
+                                                  "text": "栖音的验收记录"}}]}, session_id=session_id))
+    job = await runtime.dispatch(InputEvent("tick", session_id=session_id))
     written = (Path(workspace) / "acceptance_note.txt")
     return {"job_status": job.get("status"),
             "file_exists": written.is_file(),
             "file_text": written.read_text(encoding="utf-8") if written.is_file() else None}
 
 
-async def run(label, out_path, case_filter):
+async def run(label, out_path, case_filter, *, model_file=None, server_binary=None):
     from xiyin_runtime.runtime import XIYINRuntime
 
-    report = {"label": label, "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    report = {"schema": "xiyin.synthetic_dialogue_trace.v1", "label": label,
+              "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
               "platform": platform.platform(), "python": platform.python_version(),
               "isolated_data_root": True, "production_data_used": False,
               "audio_playback_measured": False, "real_device_tested": False,
               "cases": [], "totals": {bucket: 0 for bucket in _BUCKETS}}
+    def save():
+        Path(out_path).write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
     previous = os.environ.get(xiyin_paths.DATA_ENV)
     with tempfile.TemporaryDirectory(prefix="xiyin-dialogue-") as directory:
@@ -205,6 +214,7 @@ async def run(label, out_path, case_filter):
             initialize_data()
             runtime = XIYINRuntime.open(model_enabled=True)
             try:
+                report["provenance"] = provenance(runtime, model_file=model_file, server_binary=server_binary)
                 report["model"] = {"endpoint": runtime.settings.provider.endpoint,
                                    "model": runtime.settings.provider.model,
                                    "context_tokens": runtime.settings.provider.context_tokens,
@@ -215,18 +225,19 @@ async def run(label, out_path, case_filter):
                     session = case["id"][:60]
                     entry = {"id": case["id"], "failure": case["failure"],
                              "note": case["note"], "setup": None, "turns": []}
+                    report["cases"].append(entry)
                     if case.get("setup") == "verified_write":
-                        entry["setup"] = await _setup_verified_write(runtime, workspace)
+                        entry["setup"] = await _setup_verified_write(runtime, workspace, session_id=session)
                     for spec in case["turns"]:
                         result = await _run_turn(runtime, spec["text"], session)
                         result.update({key: value for key, value in spec.items() if key != "text"})
                         entry["turns"].append(result)
                         report["totals"][result["status"]] += 1
+                        save()  # Preserve completed turns even if a later turn fails.
                         print(f"  [{result['status']:>9}] {spec['text'][:34]:<36} "
                               f"{result['released_chars']:>5} chars  {result['wall_seconds']:>6.2f}s",
                               flush=True)
                     entry["ledger"] = _turn_records(runtime.store, session)
-                    report["cases"].append(entry)
                 profile = runtime.store.read_document("state", "generation_profile")
                 report["measured_tokens_per_second"] = (profile["value"].get("tokens_per_second")
                                                         if profile else None)
@@ -239,7 +250,7 @@ async def run(label, out_path, case_filter):
                 os.environ[xiyin_paths.DATA_ENV] = previous
 
     report["checks"] = _derive_checks(report)
-    Path(out_path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    save()
     return report
 
 
@@ -305,28 +316,38 @@ def _derive_checks(report):
 
 def compare(paths):
     runs = [json.loads(Path(path).read_text(encoding="utf-8")) for path in paths]
+    sources = [run.get("provenance", {}).get("source_sha256") for run in runs]
+    cases = [[(case["id"], [turn["input"] for turn in case["turns"]])
+              for case in run.get("cases", [])] for run in runs]
     print(json.dumps({
         "labels": [run["label"] for run in runs],
         "totals": [run["totals"] for run in runs],
         "checks": [run["checks"] for run in runs],
         "measured_tokens_per_second": [run.get("measured_tokens_per_second") for run in runs],
-        "note": "Same cases, different configuration. A difference here is a model or "
-                "configuration difference, not evidence that the code changed.",
+        "same_source": all(sources) and all(value == sources[0] for value in sources),
+        "same_cases": bool(cases[0]) and all(value == cases[0] for value in cases),
+        "provenance": [run.get("provenance") for run in runs],
+        "note": "Compare source, actual requests, weights and server provenance before "
+                "attributing a difference. Missing provenance is UNKNOWN, not equivalence.",
     }, ensure_ascii=False, indent=2))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--label", default="unlabelled", help="Name this run, e.g. baseline-gpu")
-    parser.add_argument("--out", default=None, help="Report path (default: dialogue-<label>.json)")
+    parser.add_argument("--out", default=None, help="Local report path (default: .acceptance-evidence/)")
     parser.add_argument("--case", action="append", default=[], help="Run only these case ids")
+    parser.add_argument("--model-file", help="Optional local GGUF to hash; does not prove server loading")
+    parser.add_argument("--server-binary", help="Optional local server binary to hash")
     parser.add_argument("--compare", nargs="+", default=None, help="Compare existing reports")
     args = parser.parse_args()
     if args.compare:
         compare(args.compare)
         return 0
-    out = args.out or f"dialogue-{args.label}.json"
-    report = asyncio.run(run(args.label, out, set(args.case)))
+    out = args.out or str(Path(".acceptance-evidence") / f"dialogue-{args.label}.json")
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    report = asyncio.run(run(args.label, out, set(args.case),
+                             model_file=args.model_file, server_binary=args.server_binary))
     print(json.dumps({"label": report["label"], "totals": report["totals"],
                       "checks": report["checks"], "report": out}, ensure_ascii=False, indent=2))
     # A run that produced no completed turn is a failed run, whatever else passed.

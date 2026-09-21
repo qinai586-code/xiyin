@@ -26,7 +26,8 @@ from .grounding import action_receipt_record, premise_records, topic_records
 from .lifecycle import RuntimeLease
 from .persona import load_persona
 from .output_guard import OutputGuard, OutputBlocked, VERSION as OUTPUT_GUARD_VERSION
-from .provider import GenerationBudget, LocalModelClient, ProviderCancelled, ProviderTruncated
+from .provider import (GenerationBudget, LocalModelClient, ProviderCancelled, ProviderDisabled, ProviderError,
+                       ProviderTimeout, ProviderTruncated)
 from .response_plan import ResponsePlan, estimate_tokens, plan_response, updated_rate
 
 
@@ -343,7 +344,8 @@ class XIYINRuntime(RuntimeServices):
             self.store.append_event("generation_end", {"reply_event_id": reply_id, "finish_reason": "length"},
                                     session_id=session_id, scope=scope, origin="observation", status="recorded",
                                     request_id=request_id)
-            yield TurnEvent("error", request_id, session_id, detail=f"ProviderTruncated: {exc}")
+            yield TurnEvent("error", request_id, session_id,
+                            detail="ProviderTruncated: chat output truncated: finish_reason='length'")
         except ProviderCancelled:
             self.store.append_event("assistant", output, session_id=session_id, scope=scope,
                                     origin="generated", status="cancelled", request_id=request_id)
@@ -357,7 +359,13 @@ class XIYINRuntime(RuntimeServices):
             self.store.append_event("assistant", output, session_id=session_id, scope=scope,
                                     origin="generated", status="failed", request_id=request_id)
             terminal_recorded = True
-            yield TurnEvent("error", request_id, session_id, detail=f"{type(exc).__name__}: {exc}")
+            # Provider fields and arbitrary exception messages can contain input,
+            # paths or credentials. Public events carry a fixed category only.
+            detail = ("ProviderTimeout: local model request timed out" if isinstance(exc, ProviderTimeout)
+                      else "ProviderDisabled: model is disabled; no inference request was made" if isinstance(exc, ProviderDisabled)
+                      else "ProviderError: local model request failed" if isinstance(exc, ProviderError)
+                      else "RuntimeError: turn failed")
+            yield TurnEvent("error", request_id, session_id, detail=detail)
         finally:
             token.set()
             try:

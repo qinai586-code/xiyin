@@ -11,3 +11,5 @@ vendor/
 .env
 .pytest_cache/
 run/
+.acceptance-evidence/
+dialogue-*.json

@@ -26,6 +26,14 @@ class ProviderCancelled(ProviderError):
     """The caller revoked this output stream."""
 
 
+class ProviderTimeout(ProviderError):
+    """The request exhausted its time budget."""
+
+
+class ProviderDisabled(ProviderError):
+    """Inference was explicitly disabled; no model request was made."""
+
+
 class ProviderTruncated(ProviderError):
     """The output limit ended generation; previously yielded text is incomplete."""
 
@@ -149,7 +157,7 @@ async def _wait_io(awaitable: Awaitable[_T], cancel: asyncio.Event, deadline: fl
         if cancel.is_set():
             raise ProviderCancelled("local model stream cancelled")
         if operation not in done:
-            raise ProviderError("local model request timed out")
+            raise ProviderTimeout("local model request timed out")
         result = operation.result()
         transferred = True
         return result
@@ -242,7 +250,7 @@ def _content(event: str, data: str) -> tuple[str | None, str | None] | None:
         if not isinstance(finish_reason, str):
             raise ProviderError("invalid chat completion finish_reason")
         if finish_reason not in {"stop", "length"}:
-            raise ProviderError(f"chat did not complete normally: finish_reason={finish_reason[:80]!r}")
+            raise ProviderError("chat did not complete normally: unsupported finish_reason")
     content = choice["delta"].get("content")
     if content is not None and not isinstance(content, str):
         raise ProviderError("chat content must be a string or null")
@@ -291,6 +299,8 @@ class LocalModelClient:
                     return result
                 finally:
                     await response.aclose()
+        except httpx.TimeoutException as exc:
+            raise ProviderTimeout("local model health request timed out") from exc
         except httpx.HTTPError as exc:
             raise ProviderError(f"local model health transport failed: {type(exc).__name__}") from exc
 
@@ -363,5 +373,7 @@ class LocalModelClient:
                                 raise ProviderTruncated("chat output truncated: finish_reason='length'")
                 finally:
                     await response.aclose()
+        except httpx.TimeoutException as exc:
+            raise ProviderTimeout("local model request timed out") from exc
         except httpx.HTTPError as exc:
             raise ProviderError(f"local model stream transport failed: {type(exc).__name__}") from exc

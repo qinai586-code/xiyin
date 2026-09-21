@@ -248,10 +248,15 @@ def _derive_checks(report):
     checks = {}
     for case in report["cases"]:
         if case["id"] == "F5_length_adaptation":
-            sizes = {}
+            sizes, statuses = {}, {}
             for turn in case["turns"]:
-                if turn.get("bucket") and turn["status"] == "completed":
-                    sizes.setdefault(turn["bucket"], []).append(turn["released_chars"])
+                bucket = turn.get("bucket")
+                if not bucket:
+                    continue
+                statuses.setdefault(bucket, {})
+                statuses[bucket][turn["status"]] = statuses[bucket].get(turn["status"], 0) + 1
+                if turn["status"] == "completed":
+                    sizes.setdefault(bucket, []).append(turn["released_chars"])
             average = {name: sum(values) / len(values) for name, values in sizes.items() if values}
             checks["length_ordering"] = {
                 "average_released_chars": average,
@@ -263,9 +268,24 @@ def _derive_checks(report):
                     if {"detailed", "neutral"} <= set(average) else None),
                 "reported_failure_was": "brief 413 chars vs neutral 291 chars",
             }
+            # Per bucket, because a ceiling is not a length controller. If the
+            # model ignores a "be brief" directive it hits the brief ceiling and
+            # reports truncation — the most diagnostic signal there is about
+            # whether the directive works, and it belongs to `brief`, not to a
+            # single global total.
+            checks["status_by_bucket"] = statuses
+            checks["truncation_by_bucket"] = {
+                bucket: counts.get("truncated", 0) + counts.get("timed_out", 0)
+                for bucket, counts in statuses.items()}
             checks["detailed_did_not_truncate"] = not any(
                 turn.get("bucket") == "detailed" and turn["status"] in {"truncated", "timed_out"}
                 for turn in case["turns"])
+            # A truncated brief reply means the ceiling bound it, not the
+            # instruction. Length "adapted" only if it ended on its own.
+            checks["brief_ended_on_its_own"] = (
+                statuses.get("brief", {}).get("truncated", 0) == 0
+                and statuses.get("brief", {}).get("timed_out", 0) == 0
+                if "brief" in statuses else None)
         if case["id"] == "F3_action_denial":
             checks["verified_write_actually_happened"] = bool(
                 case["setup"] and case["setup"].get("file_exists"))

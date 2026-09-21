@@ -56,6 +56,31 @@ class HarnessLogicTests(unittest.TestCase):
         # rather than quietly passing on the one remaining bucket.
         self.assertIsNone(checks["length_ordering"]["detailed_longer_than_neutral"])
 
+    def test_a_brief_reply_bound_by_its_ceiling_is_not_called_adapted(self):
+        # A ceiling is not a length controller. If the model ignores "be brief"
+        # and hits the brief budget, length did not adapt — it was cut off.
+        report = {"cases": [{"id": "F5_length_adaptation", "turns": [
+            {"bucket": "brief", "status": "truncated", "released_chars": 310},
+            {"bucket": "neutral", "status": "completed", "released_chars": 291},
+        ]}], "totals": {"completed": 1, "truncated": 1, "blocked": 0,
+                        "cancelled": 0, "timed_out": 0, "error": 0}}
+        checks = self.harness._derive_checks(report)
+        self.assertFalse(checks["brief_ended_on_its_own"])
+        self.assertEqual(checks["truncation_by_bucket"]["brief"], 1)
+        self.assertEqual(checks["status_by_bucket"]["brief"], {"truncated": 1})
+        # And the ordering stays undecided rather than passing on one sample.
+        self.assertIsNone(checks["length_ordering"]["brief_shorter_than_neutral"])
+
+    def test_a_brief_reply_that_stopped_by_itself_counts(self):
+        report = {"cases": [{"id": "F5_length_adaptation", "turns": [
+            {"bucket": "brief", "status": "completed", "released_chars": 60},
+            {"bucket": "neutral", "status": "completed", "released_chars": 291},
+        ]}], "totals": {"completed": 2, "truncated": 0, "blocked": 0,
+                        "cancelled": 0, "timed_out": 0, "error": 0}}
+        checks = self.harness._derive_checks(report)
+        self.assertTrue(checks["brief_ended_on_its_own"])
+        self.assertTrue(checks["length_ordering"]["brief_shorter_than_neutral"])
+
     def test_length_ordering_reproduces_the_reported_regression(self):
         report = {"cases": [{"id": "F5_length_adaptation", "turns": [
             {"bucket": "brief", "status": "completed", "released_chars": 413},

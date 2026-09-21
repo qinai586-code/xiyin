@@ -4,9 +4,20 @@
 [inference]
 endpoint = "http://127.0.0.1:8080/v1/chat/completions"
 model = "xiyin"
+# Fallback bounds for callers that do not plan a turn. A normal conversation
+# turn now receives a per-request budget from response_plan instead.
 timeout_seconds = 60
 max_tokens = 512
 enable_thinking = false
+# Ceilings for a planned turn. max_tokens_ceiling is a resource bound, not a
+# reply-length target; a detailed answer is allowed to use it.
+max_tokens_ceiling = 1792
+max_timeout_seconds = 600
+# Must match the server's ctx_size so a budget cannot overrun the window.
+context_tokens = 4096
+# Starting throughput assumption until this machine has been measured.
+# Deliberately conservative: a CPU run is slower than a GPU run.
+default_tokens_per_second = 8.0
 
 [foundation]
 max_input_chars = 2000

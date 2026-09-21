@@ -323,6 +323,29 @@ class ExperienceStore:
             result.append(item)
         return result
 
+    def action_receipts(self, session_id: str, scope: str = "private", limit: int = 3) -> list[dict]:
+        """Read executor receipts for body actions, in chronological order.
+
+        These are the records that answer "did that actually happen". They are
+        read exactly like memory receipts: no inference, no reconstruction for
+        actions that were recorded before this method existed.
+        """
+        session_id, scope, limit = _text(session_id, "session_id"), _scope(scope), _limit(limit)
+        with self._lock:
+            self._ensure_open()
+            rows = self._db.execute(
+                "SELECT * FROM events WHERE session_id = ? AND scope = ? AND kind = 'action_result' "
+                "AND origin = 'tool_result' ORDER BY seq DESC LIMIT ?", (session_id, scope, limit)).fetchall()
+        result = []
+        for row in reversed(rows):
+            item = dict(row)
+            try:
+                item["content"] = json.loads(item["content"])
+            except (ValueError, RecursionError):
+                continue  # A malformed receipt is not projected as an outcome.
+            result.append(item)
+        return result
+
     def remember(self, statement: str, *, kind: str = "fact", subject: str = "owner",
                  scope: str = "private", evidence_refs: list[str], supersedes: str | None = None,
                  receipt_session_id: str | None = None) -> str:

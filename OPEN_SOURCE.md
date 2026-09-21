@@ -2,6 +2,21 @@
 
 本次区分真实接口依赖、设计借鉴和未接入候选。没有宣称把参考清单中的所有仓库拼装进 Runtime，也没有复制第三方整套角色人格。以下链接对应实际核对的官方资料。
 
+## 本轮裁定：不新增任何集成
+
+主理人提供的参考索引（入档为 `docs/research/XIYIN_REFERENCE_REPOSITORIES_FULL.md`）给出了明确裁定：
+
+- §0 止损规则：**FIRST ALIVE 之前，不因为索引里有仓库就继续 clone / 集成。**
+- §16 规则 10：新仓库只有在**阻塞当前阶段**时才进入 runtime tree。
+- §18：所有 Computer Use、Game、Town、Deep Growth 项目当前只留在索引里。
+- §17：索引本身留在文档区，不进运行路径；不要建立装着几十个「以后可能有用」clone 的 `third_party/`。
+
+因此本轮**没有引入任何新的第三方运行依赖**，`third_party/` 未创建，`requirements.lock.txt` 未新增条目。下表的「实际使用方式」全部是既有状态，不是本轮新增的集成。
+
+索引 §1 定义了 `BENCHMARK` 标签（体验/角色/能力对标），但索引中没有任何仓库携带该标签——对标角色清单不在这份文件里，本轮没有据此定义能力目标，也没有编造对标对象的内部实现。
+
+索引 §16 的硬规则与本仓库现状一致，其中规则 5「不允许绕过 Ledger / verifier，把『发出命令』当『执行成功』」正是本轮修复的第 6 项：动作回执现在带 `dispatched`，派发前拒绝与派发后未达成不再同为 `failure`。
+
 | 项目 | 实际使用方式 | 本轮边界 |
 |---|---|---|
 | [llama.cpp](https://github.com/ggml-org/llama.cpp/blob/3cf03257f219afbe7334045ff7c6a06ac68c627d/tools/server/README.md) | 现有本地兼容 SSE 客户端、取消、截断状态保留 | 不启动 server，不下载权重 |

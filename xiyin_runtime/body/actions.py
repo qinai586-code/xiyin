@@ -9,7 +9,9 @@ from pathlib import Path, PureWindowsPath
 import time
 from uuid import uuid4
 
-from .models import AdapterOutcome, Capability, Observation
+import xiyin_paths
+
+from .models import AdapterOutcome, Capability, InputRejected, Observation
 
 
 def _linked(path: Path) -> bool:
@@ -41,7 +43,8 @@ class WorkspaceFileAdapter:
         if (not isinstance(name, str) or not name or name in {".", ".."} or
                 "/" in name or "\\" in name or ":" in name or "\x00" in name or
                 any(character in name for character in '<>"|?*') or name.endswith((" ", ".")) or
-                Path(name).is_absolute() or PureWindowsPath(name).drive or PureWindowsPath(name).is_reserved()):
+                Path(name).is_absolute() or PureWindowsPath(name).drive
+                or xiyin_paths.is_reserved_windows_name(name)):
             raise ValueError("Use a single relative filename inside the authorized sandbox")
         target = self.root / name
         if target.exists() or target.is_symlink():
@@ -86,14 +89,16 @@ class WorkspaceFileAdapter:
             if request.scope != str(self.root):
                 raise PermissionError("Sandbox scope mismatch")
             if cancel.is_set():
-                return AdapterOutcome("cancelled", detail="Cancelled before filesystem action")
+                return AdapterOutcome("cancelled", detail="Cancelled before filesystem action",
+                                      evidence={"dispatched": False})
             if request.operation == "read_text":
                 with target.open("rb") as stream:
                     content = stream.read(read_limit + 1)
                 if len(content) > read_limit:
                     raise ValueError("File exceeds the adapter byte limit")
                 text = content.decode("utf-8")
-                return AdapterOutcome("success", True, "Read the requested sandbox file", {"text": text})
+                return AdapterOutcome("success", True, "Read the requested sandbox file",
+                                      {"text": text, "dispatched": True, "path": target.name})
             if request.operation != "write_text":
                 raise ValueError("Unsupported filesystem operation")
             text = request.arguments.get("text")
@@ -107,7 +112,8 @@ class WorkspaceFileAdapter:
                 os.fsync(stream.fileno())
             await asyncio.sleep(0)
             if cancel.is_set() or time.monotonic() >= request.deadline:
-                return AdapterOutcome("cancelled", detail="Cancelled before atomic replacement; target unchanged")
+                return AdapterOutcome("cancelled", detail="Cancelled before atomic replacement; target unchanged",
+                                      evidence={"dispatched": False, "write_occurred": False})
             self._target(request.arguments["path"])
             temporary.replace(target)
             temporary = None
@@ -116,13 +122,14 @@ class WorkspaceFileAdapter:
             with target.open("rb") as stream:
                 actual = stream.read(read_limit + 1)
             if actual != expected:
-                return AdapterOutcome("failure", False, "Write readback did not match", {"write_occurred": True})
+                return AdapterOutcome("failure", False, "Write readback did not match",
+                                      {"write_occurred": True, "dispatched": True, "path": target.name})
             return AdapterOutcome("success", True, "Sandbox write verified by readback",
                                   {"bytes": len(actual), "sha256": hashlib.sha256(actual).hexdigest(),
-                                   "path": target.name, "write_occurred": True})
+                                   "path": target.name, "write_occurred": True, "dispatched": True})
         except Exception as exc:
             return AdapterOutcome("unknown" if committed else "failure", detail=f"{type(exc).__name__}: {exc}",
-                                  evidence={"write_occurred": committed})
+                                  evidence={"write_occurred": committed, "dispatched": committed})
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
@@ -205,20 +212,29 @@ class DesktopAdapter:
 
     async def execute(self, request, cancel: asyncio.Event) -> AdapterOutcome:
         if self.driver is None:
-            return AdapterOutcome("failure", detail="Desktop driver unavailable")
+            return AdapterOutcome("failure", detail="Desktop driver unavailable",
+                                  evidence={"dispatched": False})
         if request.scope != self.window or await self.driver.current_window() != self.window:
             await self.stop()
-            return AdapterOutcome("failure", detail="Authorized window is not focused")
+            # Refused before dispatch. No key, click or focus change was sent.
+            return AdapterOutcome("failure", detail="Authorized window is not focused; nothing was dispatched",
+                                  evidence={"dispatched": False, "rejected_before_dispatch": True,
+                                            "reason": "window_not_focused"})
         if cancel.is_set():
-            return AdapterOutcome("cancelled", detail="Cancelled before input dispatch")
+            return AdapterOutcome("cancelled", detail="Cancelled before input dispatch",
+                                  evidence={"dispatched": False})
         arguments = request.arguments
         if request.operation == "key_down":
             duration = arguments.get("lease_seconds", 0.25)
             key = arguments.get("key")
             if not isinstance(key, str) or not key or not isinstance(duration, (int, float)) or not 0 < duration <= 1:
-                return AdapterOutcome("failure", detail="Key input requires a named key and lease of at most one second")
+                return AdapterOutcome("failure", detail="Key input requires a named key and lease of at most one second",
+                                      evidence={"dispatched": False, "rejected_before_dispatch": True,
+                                                "reason": "invalid_key_request"})
             if key in self._held_keys:
-                return AdapterOutcome("failure", detail="Key already held by an active lease")
+                return AdapterOutcome("failure", detail="Key already held by an active lease",
+                                      evidence={"dispatched": False, "rejected_before_dispatch": True,
+                                                "reason": "key_already_held"})
             # Install the release timer before send: a partial send may still press it.
             self._held_keys.add(key)
             self._leases[key] = asyncio.create_task(self._lease(key, duration))
@@ -229,16 +245,30 @@ class DesktopAdapter:
                 await self.driver.send(request.operation, arguments)
             if cancel.is_set() or await self.driver.current_window() != self.window:
                 await self.stop()
-                return AdapterOutcome("unknown", detail="Input dispatched, then cancelled or focus changed; keys released")
+                return AdapterOutcome("unknown", detail="Input dispatched, then cancelled or focus changed; keys released",
+                                      evidence={"dispatched": True})
             verified = await self.driver.verify(request)
-            return AdapterOutcome("success" if verified is True else "failure" if verified is False else "unknown",
-                                  verified is True, "Observed postcondition" if verified is True else "Input dispatch is not proof of completion")
+            if verified is True:
+                return AdapterOutcome("success", True, "Observed postcondition", {"dispatched": True})
+            if verified is False:
+                return AdapterOutcome("failure", False, "Input was dispatched and the postcondition was not observed",
+                                      {"dispatched": True, "postcondition_observed": False})
+            return AdapterOutcome("unknown", False, "Input dispatch is not proof of completion",
+                                  {"dispatched": True, "postcondition_observed": None})
         except asyncio.CancelledError:
             await self.stop()
             raise
+        except InputRejected as exc:
+            # The driver declined before touching the desktop, so this is a
+            # refusal to report, not an ambiguous outcome to hedge about.
+            await self.stop()
+            return AdapterOutcome("failure", detail=f"Refused before dispatch: {exc}",
+                                  evidence={"dispatched": False, "rejected_before_dispatch": True,
+                                            "reason": "driver_refused"})
         except Exception as exc:
             await self.stop()
-            return AdapterOutcome("unknown", detail=f"Input result unverified: {type(exc).__name__}: {exc}")
+            return AdapterOutcome("unknown", detail=f"Input result unverified: {type(exc).__name__}: {exc}",
+                                  evidence={"dispatched": True})
 
     async def stop(self) -> dict:
         keys = list(self._held_keys)

@@ -10,10 +10,10 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import json
-from pathlib import PureWindowsPath
 import re
 from uuid import uuid4
 
+import xiyin_paths
 from .experience import _json_object, _scope, _text
 
 
@@ -42,7 +42,7 @@ def _session(session_id, scope):
 def _filename(value):
     if (not isinstance(value, str) or not value or value in {".", ".."}
             or any(ord(char) < 32 for char in value) or any(char in value for char in '/\\:<>"|?*')
-            or value.endswith((" ", ".")) or PureWindowsPath(value).is_reserved()):
+            or value.endswith((" ", ".")) or xiyin_paths.is_reserved_windows_name(value)):
         raise ValueError("File skills require a direct relative workspace filename")
     return value
 
@@ -199,6 +199,12 @@ class Director:
 
     def propose_growth(self, kind, subject, statement, evidence_refs, session_id="owner", scope="private"):
         session_id, scope = _session(session_id, scope)
+        if scope != "private":
+            # A viewer can send feedback, and feedback is what growth reads. Without
+            # this, a public adapter could plant a growth-shaped payload and shape
+            # her character — `expression:public` most of all. Scope isolation keeps
+            # such a memory out of private turns, but it must not form at all.
+            raise PermissionError("Character growth requires owner-scope evidence; viewers cannot shape it")
         self._growth_field(kind, subject)
         statement = _text(statement, "growth statement")
         if len(statement) > 2000:
@@ -211,6 +217,54 @@ class Director:
         value.update(id=candidate_id, candidate_type="character_growth", status="proposed", created_at=_now(),
                      digest=_digest(self._growth_payload(value)))
         return self.store.write_document("candidates", candidate_id, value, expected_version=0)["value"]
+
+    def review_feedback_growth(self, session_id="owner", scope="private", *, adopt=True, limit=8):
+        """Turn feedback already on record into growth, without asking again.
+
+        Growth existed but only ever started from an explicit owner command,
+        so real interaction outcomes never reached it. This reads the feedback
+        events the owner already gave, which ``_growth_evidence`` validates
+        against the same rules, and proposes the fields they support. Ordinary
+        reversible growth needs no separate approval; ``rollback_growth``
+        remains the way back. Nothing here infers a field from tone, from a
+        model's output, or from the mere passage of time.
+        """
+        session_id, scope = _session(session_id, scope)
+        if scope != "private":
+            return []
+        known = {item["value"].get("digest") for item in self.store.list_documents("candidates")
+                 if item["value"].get("candidate_type") == "character_growth"}
+        results = []
+        for event in self.store.list_events(session_id, scope):
+            if len(results) >= limit:
+                break
+            if event["kind"] != "self_state_observation" or event["origin"] != "user_report":
+                continue
+            try:
+                payload = json.loads(event["content"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict) or payload.get("kind") != "user_feedback":
+                continue
+            growth = payload.get("payload", {}).get("growth") if isinstance(payload.get("payload"), dict) else None
+            if not isinstance(growth, dict) or set(growth) != {"kind", "subject", "statement"}:
+                continue
+            value = {**growth, "evidence_refs": [event["id"]], "session_id": session_id, "scope": scope}
+            try:
+                self._growth_field(growth["kind"], growth["subject"])
+            except ValueError:
+                continue
+            if _digest(self._growth_payload(value)) in known:
+                continue
+            try:
+                candidate = self.propose_growth(growth["kind"], growth["subject"], growth["statement"],
+                                                [event["id"]], session_id=session_id, scope=scope)
+                results.append(self.adopt_growth(candidate["id"]) if adopt else candidate)
+                known.add(candidate["digest"])
+            except (ValueError, KeyError):
+                # Unsupported or superseded feedback is skipped, not forced.
+                continue
+        return results
 
     def _candidate(self, candidate_id):
         document = self.store.read_document("candidates", candidate_id)

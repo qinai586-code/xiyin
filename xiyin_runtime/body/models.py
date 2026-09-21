@@ -58,6 +58,16 @@ class ActionRequest:
     action_id: str = field(default_factory=lambda: uuid4().hex)
 
 
+class InputRejected(PermissionError):
+    """A driver refused before anything was sent to the desktop.
+
+    Distinguishing this from a transport error matters to the person asking:
+    "the window was not focused, so I did not click" and "I clicked and cannot
+    confirm what happened" are different answers, and the previous code turned
+    both into an unverified outcome with no way to tell them apart.
+    """
+
+
 @dataclass(frozen=True)
 class AdapterOutcome:
     status: str

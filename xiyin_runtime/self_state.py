@@ -97,6 +97,47 @@ class SelfState:
                       affect_interpretation="bounded runtime appraisal, not evidence of subjective experience")
         return result
 
+    def disposition(self, session_id="owner", scope="private") -> dict:
+        """Project functional state as context for expression and scheduling.
+
+        Without this, mood and attention were computed on every turn and read
+        by nothing: the character seed existed as text and the affect values
+        existed as numbers, with no path between them. The wording stays
+        explicitly functional, because these values are a runtime appraisal,
+        not evidence that anything is felt.
+        """
+        # Strictly read-only: composing context must not create a state
+        # document, so a session with no observations yet projects the
+        # starting values rather than inventing an observation to write.
+        document = self.store.read_document("state", self._key(session_id, scope))
+        state = document["value"] if document else {
+            "activity": "idle", "attention": None,
+            "affect": {"valence": 0.0, "arousal": 0.0, "control": 0.5}}
+        affect = state.get("affect", {})
+        valence = affect.get("valence", 0.0)
+        arousal = affect.get("arousal", 0.0)
+        control = affect.get("control", 0.5)
+        if any(not isinstance(value, (int, float)) or isinstance(value, bool)
+               for value in (valence, arousal, control)):
+            valence, arousal, control = 0.0, 0.0, 0.5
+        tone = "轻快一些" if valence > 0.25 else ("低一些" if valence < -0.25 else "平稳")
+        energy = "投入" if arousal > 0.5 else ("安静" if arousal < 0.15 else "一般")
+        if control > 0.65:
+            footing, caution = "最近的动作大多验证成功", False
+        elif control < 0.4:
+            footing, caution = "最近有动作没有成功，先确认现状再动手", True
+        else:
+            footing, caution = "动作结果有成有败", False
+        attention = state.get("attention")
+        focus = "当前这句话" if attention == "current_input" else (attention or "没有特别集中的事")
+        line = (f"当前功能状态：注意力在{focus}，语气{tone}，状态{energy}，{footing}。"
+                "这是运行中的计算状态，可以影响语气和先做什么；它不是主观体验，"
+                "也不需要逐项汇报，更不会自动变成长期性格。")
+        return {"activity": state.get("activity", "idle"), "attention": attention,
+                "tone": tone, "energy": energy, "footing": footing,
+                "caution": caution, "line": line,
+                "interpretation": "bounded runtime appraisal, not evidence of subjective experience"}
+
     def observe(self, kind, payload, session_id="owner", scope="private"):
         if kind not in OBSERVATIONS or not isinstance(payload, dict):
             raise ValueError("unsupported state observation or payload")

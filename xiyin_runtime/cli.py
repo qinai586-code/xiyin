@@ -20,6 +20,36 @@ from .provider import LocalModelClient
 from .runtime import FoundationRuntime
 
 
+# Versions this repository's CI actually runs. Anything outside the range is
+# not a claim of breakage, only that nothing here has tested it.
+SUPPORTED_PYTHON = ((3, 12), (3, 13))
+
+
+def check_interpreter(version=None) -> dict:
+    """Report whether this interpreter is one the project tests.
+
+    A mismatched interpreter previously surfaced as a single mysterious test
+    failure several hundred cases into a run, which cost a whole Windows
+    acceptance attempt. It should be visible in the first second instead.
+    """
+    version = tuple(version or sys.version_info[:2])
+    low, high = SUPPORTED_PYTHON
+    if version < low:
+        state = "unsupported_too_old"
+    elif version > high:
+        state = "untested_newer"
+    else:
+        state = "supported"
+    return {"running": ".".join(str(part) for part in version),
+            "supported_range": f"{low[0]}.{low[1]}–{high[0]}.{high[1]}",
+            "state": state,
+            "detail": {
+                "supported": "Tested by this repository's CI.",
+                "untested_newer": "Newer than anything CI runs here; results are not evidence about this version.",
+                "unsupported_too_old": "Older than the supported floor; rebuild the virtual environment.",
+            }[state]}
+
+
 def initialize_data(*, adopt_existing=False) -> dict:
     """Explicit operator action. Routine startup never creates an empty identity."""
     authorize_runtime()
@@ -46,6 +76,7 @@ def initialize_data(*, adopt_existing=False) -> dict:
 
 def doctor(*, probe_model=False) -> tuple[dict, bool]:
     report = {"platform": platform.platform(), "python": platform.python_version(),
+              "interpreter": check_interpreter(),
               "windows_native": os.name == "nt", "checks": {},
               "audio_and_gpu_performance": "not_measured",
               "runtime_session": "not_started",

@@ -4,6 +4,7 @@ The markers locate roots; they do not grant permission. Link containment is a
 path check, not a sandbox or protection against concurrent filesystem changes.
 """
 
+import ntpath
 import os
 from pathlib import Path, PureWindowsPath
 import re
@@ -21,6 +22,21 @@ _WINDOWS_DEVICES = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} | {
     for prefix in ("COM", "LPT")
     for suffix in "123456789¹²³"
 }
+
+
+def is_reserved_windows_name(name: str) -> bool:
+    """Windows device-name check that survives the pathlib deprecation.
+
+    ``PurePath.is_reserved()`` is deprecated in 3.13 and removed in 3.15, so
+    under ``-W error`` it raises rather than answers. ``ntpath.isreserved``
+    replaces it from 3.13 on and gives identical answers for these names, but
+    does not exist earlier. ``os.path.isreserved`` is Windows-only, so it
+    cannot be used from a Linux test run that still needs Windows semantics.
+    """
+    checker = getattr(ntpath, "isreserved", None)
+    if checker is not None:
+        return checker(name)
+    return PureWindowsPath(name).is_reserved()
 
 
 class XiyinPathError(ValueError):

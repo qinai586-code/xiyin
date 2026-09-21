@@ -10,10 +10,10 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import json
-from pathlib import PureWindowsPath
 import re
 from uuid import uuid4
 
+import xiyin_paths
 from .experience import _json_object, _scope, _text
 
 
@@ -42,7 +42,7 @@ def _session(session_id, scope):
 def _filename(value):
     if (not isinstance(value, str) or not value or value in {".", ".."}
             or any(ord(char) < 32 for char in value) or any(char in value for char in '/\\:<>"|?*')
-            or value.endswith((" ", ".")) or PureWindowsPath(value).is_reserved()):
+            or value.endswith((" ", ".")) or xiyin_paths.is_reserved_windows_name(value)):
         raise ValueError("File skills require a direct relative workspace filename")
     return value
 

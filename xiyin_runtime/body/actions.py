@@ -9,6 +9,8 @@ from pathlib import Path, PureWindowsPath
 import time
 from uuid import uuid4
 
+import xiyin_paths
+
 from .models import AdapterOutcome, Capability, InputRejected, Observation
 
 
@@ -41,7 +43,8 @@ class WorkspaceFileAdapter:
         if (not isinstance(name, str) or not name or name in {".", ".."} or
                 "/" in name or "\\" in name or ":" in name or "\x00" in name or
                 any(character in name for character in '<>"|?*') or name.endswith((" ", ".")) or
-                Path(name).is_absolute() or PureWindowsPath(name).drive or PureWindowsPath(name).is_reserved()):
+                Path(name).is_absolute() or PureWindowsPath(name).drive
+                or xiyin_paths.is_reserved_windows_name(name)):
             raise ValueError("Use a single relative filename inside the authorized sandbox")
         target = self.root / name
         if target.exists() or target.is_symlink():

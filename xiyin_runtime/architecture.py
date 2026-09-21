@@ -45,6 +45,10 @@ class RuntimeServices:
         self._job_active = False
         self._job_task = None
         self._active_task = None
+        # Direct action dispatches are caller tasks the runtime does not own.
+        # Shutdown must still drain them before closing the ledger, so they are
+        # tracked here rather than left to finish by scheduling luck.
+        self._action_tasks = set()
         self._stopped = False
         self._dispatch_lock = asyncio.Lock()
         self._last_input = time.monotonic()
@@ -136,7 +140,7 @@ class RuntimeServices:
             elif self.speech is not None:
                 await self.speech.close()
         finally:
-            pending = {task for task in (self._active_task, self._job_task)
+            pending = {task for task in (self._active_task, self._job_task, *self._action_tasks)
                        if task is not None and task is not asyncio.current_task() and not task.done()}
             if pending:
                 done, live = await asyncio.wait(pending, timeout=0.25)
@@ -275,20 +279,30 @@ class RuntimeServices:
                                 scope=scope, origin="observation", status="recorded")
         token = cancel if cancel is not None else asyncio.Event()
         watcher = asyncio.create_task(self.watch_stop(token))
+        # Stay registered until the receipt is on the ledger, not merely until
+        # the adapter returns: the window this closes is exactly the one
+        # between dispatch finishing and the outcome being recorded.
+        current = asyncio.current_task()
+        if current is not None:
+            self._action_tasks.add(current)
         try:
-            receipt = await self.body.execute(request, cancel=token)
+            try:
+                receipt = await self.body.execute(request, cancel=token)
+            finally:
+                if cancel is None:
+                    token.set()
+                if not self._stopped:
+                    watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
+            status = {"success": "verified_success", "failure": "verified_failure"}.get(receipt.status, receipt.status)
+            record = receipt.to_dict()
+            evidence = self.store.append_event("action_result", record, session_id=session, scope=scope,
+                                               origin="tool_result", status=status)
+            self.self_state.observe("action_result", {"event_id": evidence, "status": status}, session, scope)
+            return dict(record, event_id=evidence)
         finally:
-            if cancel is None:
-                token.set()
-            if not self._stopped:
-                watcher.cancel()
-            await asyncio.gather(watcher, return_exceptions=True)
-        status = {"success": "verified_success", "failure": "verified_failure"}.get(receipt.status, receipt.status)
-        record = receipt.to_dict()
-        evidence = self.store.append_event("action_result", record, session_id=session, scope=scope,
-                                           origin="tool_result", status=status)
-        self.self_state.observe("action_result", {"event_id": evidence, "status": status}, session, scope)
-        return dict(record, event_id=evidence)
+            if current is not None:
+                self._action_tasks.discard(current)
 
     def create_goal(self, payload, session, scope):
         title, steps = payload.get("title"), payload.get("steps")

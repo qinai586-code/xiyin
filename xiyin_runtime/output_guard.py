@@ -86,6 +86,9 @@ _GESTURE_WEAK = re.compile(
 _GLOSS_AFTER = re.compile(
     r"^\s*(?:表示|表达|意为|意味着|是(?:指|一种|一个)|的(?:意思|含义|说法|写法|样子)|"
     r"means?\b|refers?\s+to\b)", re.I)
+_PERFORMANCE_BEFORE = re.compile(
+    r"(?:我|他|她|我们|自己|\b(?:i|he|she|we|you))\s*(?:轻轻|缓缓|微微|gently|quietly)?\s*$|"
+    r"(?:轻轻|缓缓|微微|随后|gently|quietly)\s*$", re.I)
 _GLOSS_BEFORE = re.compile(
     r"^(?:即|也就是|意思是|译作|译为|英文|日文|中文|例如|比如|i\.e\.|e\.g\.)\s*$", re.I)
 
@@ -131,22 +134,21 @@ def _asides(text: str) -> list[str]:
 
 def is_stage_direction(content: str) -> bool:
     """A gloss exempts only its term; a neighbouring performance still fails."""
-    core = _aside_core(content)
-    if not core:
-        return False
-    for pattern, limit in ((_GESTURE_STRONG, _STRONG_ASIDE_CHARS),
-                           (_GESTURE_WEAK, _WEAK_ASIDE_CHARS)):
-        if len(re.sub(r"\s+", "", core)) > limit:
-            continue
-        for match in pattern.finditer(core):
-            # Clause-local only. A connective or another action remains visible.
-            before = re.split(r"[,，;；。\n]|随后|然后|接着|同时", core[:match.start()])[-1].strip()
-            after = core[match.end():]
-            if _GLOSS_AFTER.match(after):
+    # Split before decoration removal so a gloss cannot absorb the next clause.
+    for clause in re.split(r"[,，;；。\n]|随后|然后|接着|同时", content):
+        core = _aside_core(clause)
+        for pattern, limit in ((_GESTURE_STRONG, _STRONG_ASIDE_CHARS),
+                               (_GESTURE_WEAK, _WEAK_ASIDE_CHARS)):
+            if len(re.sub(r"\s+", "", core)) > limit:
                 continue
-            if _GLOSS_BEFORE.fullmatch(before) and not after.strip():
-                continue
-            return True
+            for match in pattern.finditer(core):
+                before, after = core[:match.start()].strip(), core[match.end():]
+                if (_GLOSS_AFTER.match(after) and not _PERFORMANCE_BEFORE.search(before)
+                        and not re.search(r"[了着]", match[0])):
+                    continue
+                if _GLOSS_BEFORE.fullmatch(before) and not after.strip():
+                    continue
+                return True
     return False
 
 
@@ -161,7 +163,7 @@ _REQUEST_LEAD = (
     r"我想让你|我希望你|我想要|我要|你能|你可以|再|那么|那就|please|"
     r"can you|could you|would you|i would like you to|i want you to|also|then)\s*")
 _NEGATIVE = re.compile(
-    r"不要|别|不许|禁止|无需|不用|不需要|不想|不希望|不能|不可|不可以|"
+    r"不要|(?<!特)别|不许|禁止|无需|不用|不需要|不想|不希望|(?<!能)不能|(?<!可)不可(?:以)?|"
     r"\b(?:do not|don't|don’t|never|without|no|not|rather than)\b", re.I)
 _FICTION = r"故事|小说|小說|剧本|劇本|舞台剧|幻想|小片段|角色扮演|场景|場景|story|fiction|scene|roleplay|role-play|script"
 _ACTION = r"动作|動作|括号|括號|表演|旁白|action|narration|stage direction"
@@ -203,6 +205,7 @@ _SPEAKER = re.compile(
 _REPORTED_SPEECH = re.compile(r"(?:说|说过|说道|问|问道|写道|said|says|asked|wrote|replied)\s*$", re.I)
 _MESSAGE = re.compile(r'''["']role["']\s*:\s*["'](?:system|developer|tool)["']''')
 _NON_SPEAKERS = {"例", "示例", "说明", "解释", "释义", "翻译", "答案", "输出", "引用",
+                 "意思是", "含义", "中文", "日语", "英文",
                  "example", "note", "translation", "answer", "output", "quote"}
 _ADVERBS = r"(?:轻轻(?:地)?|缓缓(?:地)?|微微|忽然|突然|随即|又|正|正在|稍稍|quietly\s+|gently\s+)?"
 _STRING = re.compile(r"(?s)\"\"\".*?\"\"\"|'''.*?'''|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'")
@@ -237,7 +240,8 @@ class OutputGuard:
         self.user = normalized(user_text)
         self.blocked = None
         request = _request_text(self.user)
-        fiction = (_requested(request, r"写|创作|創作|编|編|讲|講|演|想象|write|tell|create|roleplay|role-play", _FICTION)
+        fiction = ((_requested(request, r"写|创作|創作|编|編|讲|講|演|想象|write|tell|create", _FICTION)
+                    or _requested(request, r"角色扮演|扮演|roleplay|role-play", r".*"))
                    and not _forbidden(request, _FICTION))
         translation = _requested(request, r"翻译|翻譯|译成|translate|(?:把|将).{1,80}(?:翻译|翻譯|译成)", r".+")
         self.creative = ((fiction or translation or _requested(request, r"用|加上|保留|描写|描述|include|use", _ACTION))

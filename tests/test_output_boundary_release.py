@@ -99,12 +99,19 @@ class OutputBoundaryReleaseTests(unittest.IsolatedAsyncioTestCase):
         runtime = self.runtime(provider)
         events = await self.collect(runtime, "解释你的人设")
         self.assertEqual(events[-1].detail, "OutputBlocked: instruction_echo")
-        for text in (persona.data["identity_agreements"]["artificial_identity"], fixtures.GLOSS,
+        # The artificial_identity seed includes an imperative ("不编造...").
+        # It is not a public fact merely because of the field it came from.
+        instruction = persona.data["identity_agreements"]["artificial_identity"]
+        runtime = self.runtime(FakeProvider((instruction,)))
+        self.assertEqual((await self.collect(runtime, "解释你的人工身份"))[-1].detail,
+                         "OutputBlocked: instruction_echo")
+        for text in ("我由软件和模型组成，可以讨论自己的技术组成。",
+                     persona.data["identity_agreements"]["presentation_seed"], fixtures.GLOSS,
                      "我是" + persona.name + "，我愿意说出自己的看法。"):
             provider = FakeProvider(tuple(text))
             runtime = self.runtime(provider)
             events = await self.collect(runtime, "解释‘点头’的意思，也介绍你的人工身份。")
-            self.assertEqual(events[-1].type, "complete")
+            self.assertEqual(events[-1].type, "complete", (text, events[-1].detail))
             self.assertEqual("".join(e.text for e in events if e.type == "text_delta"), text)
             self.assertEqual(len(provider.calls), 1)
 

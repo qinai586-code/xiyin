@@ -156,6 +156,22 @@ class OutputBoundaryRepairTests(unittest.TestCase):
                      "可以明天再试（也就是周二）。", "[a, b] ∩ (c, d) = ∅。"):
             self.allowed("解释一下", text)
 
+    def test_gloss_permission_is_local_even_when_performance_explains_itself(self):
+        for text in ("（我点头表示同意）你好。", "（轻轻点头表示同意）你好。",
+                     "（例如周二；我微笑表示高兴）你好。", "（nod means agreement; I nod）Hello."):
+            self.blocked("解释一下", text, "unsolicited_stage_direction")
+        for text in (GLOSS, "这是一个译法（译为点头）。", "（点头的意思；微笑的说法）都是解释。"):
+            self.allowed("解释一下", text)
+
+    def test_translation_labels_and_explicit_roleplay_are_not_false_positives(self):
+        self.allowed("用日语跟我打招呼并用中文解释。", "こんにちは！意思是：你好呀！")
+        for user in ("请角色扮演一位旅人。", "Please roleplay a traveller.",
+                     "能不能写一个故事？", "可不可以写一个特别的故事？"):
+            self.allowed(user, SCENE + SELF)
+            self.blocked(user, ANNOTATION, "internal_annotation")
+        self.blocked("不能写故事。", SCENE, "unsolicited_scene")
+        self.blocked("不可以写故事。", SCENE, "unsolicited_scene")
+
 
 if __name__ == "__main__":
     unittest.main()

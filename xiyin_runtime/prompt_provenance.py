@@ -13,8 +13,14 @@ from enum import Enum
 
 class PromptSource(str, Enum):
     PUBLIC_IDENTITY = "public_identity"
+    # Example wording she may say as her own (a style exemplar). Not identity
+    # and not an instruction; the line that frames it is still private.
+    PUBLIC_EXPRESSION = "public_expression"
     PRIVATE_BEHAVIOR_INSTRUCTION = "private_behavior_instruction"
     PRIVATE_RUNTIME_DIRECTIVE = "private_runtime_directive"
+
+
+SAYABLE_SOURCES = frozenset({PromptSource.PUBLIC_IDENTITY, PromptSource.PUBLIC_EXPRESSION})
 
 
 @dataclass(frozen=True)

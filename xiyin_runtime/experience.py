@@ -358,6 +358,24 @@ class ExperienceStore:
                  "content": row["content"], "event_id": row["id"], "scope": row["scope"],
                  "origin": row["origin"], "status": row["status"]} for row in reversed(rows)]
 
+    def last_utterance_at(self, session_id: str, scope: str = "private") -> str | None:
+        """When anything was last said in this session (the ledger's UTC time).
+
+        Same evidence rule as utterances(): a user's words count even when the
+        reply failed; assistant text counts only as far as it was delivered.
+        """
+        session_id, scope = _text(session_id, "session_id"), _scope(scope)
+        with self._lock:
+            self._ensure_open()
+            row = self._db.execute(f"""
+                SELECT created_at FROM events AS reply WHERE session_id = ? AND scope = ? AND (
+                    (kind IN ('user', 'user_turn') AND status IN ('recorded', 'complete', 'completed')) OR
+                    (kind IN ('assistant', 'assistant_turn') AND {_delivered("reply")})
+                ) AND origin NOT IN ('simulation', 'design_seed', 'reflection', 'inference')
+                ORDER BY seq DESC LIMIT 1
+            """, (session_id, scope)).fetchone()
+        return row["created_at"] if row else None
+
     def operation_receipts(self, session_id: str, scope: str = "private", limit: int = 2) -> list[dict]:
         """Read existing memory-operation receipts, not statements about success.
 

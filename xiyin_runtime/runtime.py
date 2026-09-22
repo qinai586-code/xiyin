@@ -7,6 +7,7 @@ heard it. A later Body must supply separate playback receipts.
 import asyncio
 from contextlib import aclosing
 from dataclasses import dataclass
+import hashlib
 import inspect
 import json
 import logging
@@ -27,7 +28,8 @@ from .lifecycle import RuntimeLease
 from .persona import load_persona
 from .output_guard import OutputGuard, OutputBlocked, VERSION as OUTPUT_GUARD_VERSION
 from .provider import GenerationBudget, LocalModelClient, ProviderCancelled, ProviderTruncated
-from .prompt_provenance import PromptSource, runtime_projection
+from .persona_style import profile as style_profile
+from .prompt_provenance import SAYABLE_SOURCES, runtime_projection
 from .response_plan import ResponsePlan, estimate_tokens, plan_response, updated_rate
 from .turn_policy import build_turn_policy
 
@@ -36,6 +38,17 @@ _logger = logging.getLogger(__name__)
 # Added to a turn's directive under the v2 projection when TurnPolicy grants
 # stage performance, so an explicit creative request is not left to guesswork.
 _CREATIVE_DIRECTIVE = "这一轮是创作：作品里的动作、场景和对白可以照常写。"
+
+
+def _style_counts(raw_output, prompt, persona):
+    """Marker counts for the turn receipt; a failure here never fails a turn."""
+    try:
+        counts = style_profile(raw_output, user_text=prompt, exemplars=persona.projected_exemplars())
+    except Exception:
+        _logger.debug("Style profile skipped")
+        return None
+    counts.pop("opener", None)  # a prefix of her words; the ledger keeps counts only
+    return counts
 
 
 @dataclass(frozen=True)
@@ -164,14 +177,21 @@ class XIYINRuntime(RuntimeServices):
                   if m.get("kind") in {"persona", "preference", "opinion", "relationship"}]
         history = [{"role": h["role"], "content": h["content"]}
                    for h in self.store.history(session_id, scope=scope, limit=self.settings.history_messages)]
-        persona = self.persona.system_projection(growth, version=self.settings.persona_projection, scope=scope)
+        version = self.settings.persona_projection
+        persona = self.persona.system_projection(growth, version=version, scope=scope)
+        # v3 keeps appearance out of the standing prompt and states it when
+        # asked, and grounds "开机后知道过了多久" in the ledger's last utterance.
+        disclosed = ((*self.continuity_facts(session_id, scope), *self.persona.disclosures(text))
+                     if version == "v3" else ())
         return {"persona": persona.text, "protected_instructions": persona.protected_instructions,
-                "public_identity": tuple(f.text for f in persona.fragments if f.source is PromptSource.PUBLIC_IDENTITY),
+                "public_identity": tuple(f.text for f in persona.fragments if f.source in SAYABLE_SOURCES),
                 "history": history,
                 "records": self._records(text, session_id, scope),
-                "facts": self.conversation_facts(session_id, scope),
+                "facts": self.conversation_facts(session_id, scope, register=version),
                 # Facts to be stated, not instructions: never in the protected set.
-                "public_facts": tuple(self.grounding_facts(session_id, scope))}
+                "public_facts": (*self.grounding_facts(session_id, scope), *disclosed),
+                "persona_projection": version,
+                "persona_sha256": hashlib.sha256(persona.text.encode("utf-8")).hexdigest()}
 
     def _compose(self, prepared: dict, text: str, response_directive: str = "") -> list[dict]:
         facts = "\n".join((prepared["facts"], *prepared.get("public_facts", ())))
@@ -256,20 +276,21 @@ class XIYINRuntime(RuntimeServices):
         provider_end = None
         terminal_recorded = False
         plan = None
+        prepared = None
+        prompt = text.strip()
         started = time.monotonic()
         first_token_at = None
         first_released_at = None
         try:
-            prompt = text.strip()
             # Plan against the assembled prompt so the budget accounts for the
             # real context, then recompose with this turn's scope directive.
             prepared = self._prepare(prompt, session_id, scope)
             plan = self._plan_turn(prompt, self._compose(prepared, prompt), session_id, scope)
             policy = build_turn_policy(prompt)
             directive = plan.directive
-            if self.settings.persona_projection == "v2" and policy.allow_stage_performance:
-                # The one policy the model must know to comply: v2 no longer
-                # carries a standing rule about actions, so say it per turn.
+            if self.settings.persona_projection in {"v2", "v3"} and policy.allow_stage_performance:
+                # The one policy the model must know to comply: v2 and v3 carry
+                # no standing rule about actions, so say it per turn.
                 directive = "\n".join(filter(None, (directive, _CREATIVE_DIRECTIVE)))
             messages = self._compose(prepared, prompt, directive)
             protected = (prepared["protected_instructions"]
@@ -405,6 +426,12 @@ class XIYINRuntime(RuntimeServices):
                                                                if first_released_at else None),
                             "generation_seconds": round(time.monotonic() - started, 3),
                             "audio_playback_measured": False,
+                            # Which persona text produced this turn, and marker
+                            # counts of what the model wrote (raw, also when
+                            # blocked). Evidence for drift, never a verdict.
+                            "persona_projection": prepared.get("persona_projection") if prepared else None,
+                            "persona_sha256": prepared.get("persona_sha256") if prepared else None,
+                            "style": _style_counts(raw_output, prompt, self.persona) if raw_output else None,
                         }, session_id=session_id, scope=scope, origin="observation",
                             status="recorded", request_id=request_id)
                     if guard is not None:

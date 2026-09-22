@@ -32,7 +32,7 @@ class ProjectionV2Tests(unittest.TestCase):
         self.assertEqual(sha256(self.persona.system_projection(version="v1").text.encode()).hexdigest(),
                          "377a8f07497eb8d9adb728479a23fd4e0af5fa55599518d2659448867cda33f9")
         with self.assertRaises(ValueError):
-            self.persona.system_projection(version="v3")
+            self.persona.system_projection(version="v4")
 
     def test_v2_keeps_the_seed_but_not_the_rulebook(self):
         text = self.persona.system_projection(version="v2").text

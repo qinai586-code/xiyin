@@ -3,7 +3,9 @@
 ```text
 DOCUMENT STATUS   = DESIGN · extends Architecture v1.0 M1 and v1.1 §15.2 / §16.3; replaces neither
 SCOPE             = how the character seed becomes speech, expression, choices and growth
-IMPLEMENTED       = only what §12 marks P0-done (v2 speaking projection, clock grounding, harness arms)
+IMPLEMENTED       = only what §12 marks P0-done (v2 and v3 speaking projections, clock grounding,
+                    harness arms, persona_version and style counts in receipts, P1/P2/P4/P5 probes)
+DEFINITION        = what XIYIN is as an AI, and the v3 projection: XIYIN_Persona_Definition_v1.md
 NOT CLAIMED       = any real-model result; Neuro-sama / 木几萌 / Shizuku internals
 ```
 
@@ -290,7 +292,7 @@ content, simulations or blocked generations (v1.0 §13).
 
 | Phase | Deliverables | Exit criteria |
 |---|---|---|
-| **P0** (inside A, now) | ✅ v2 speaking projection + v1 kept for A/B; ✅ clock and honest action footing; ✅ harness arms and evidence. Remaining: `persona_version` in receipts; seed `disclosure` fields; P1–P6 probe cases | Windows A/B report v1 vs v2 on Qwen3.5-4B; zero released private runs ≥ 12; raw stage-direction and service-phrase rates recorded per arm |
+| **P0** (inside A, now) | ✅ v2 speaking projection + v1 kept for A/B; ✅ clock and honest action footing; ✅ harness arms and evidence; ✅ v3 projection (voice, stance, two exemplars; appearance by disclosure), exemplar experiment moved here from P1; ✅ `persona_projection` / `persona_sha256` / style counts in receipts; ✅ `persona_style` metrics; ✅ P1, P2, P4, P5 probe cases (P3 = F2/F4/F8). Remaining: P6 scope probe | Windows A/B/C report v1 vs v2 vs v3 on Qwen3.5-4B; zero released private runs ≥ 12; `persona_style` rates recorded per arm at the same recorded sampling |
 | **P1** (A→B) | Persona Compiler + Snapshot; templates out of code; per-turn selection and budget; exemplar experiment | Snapshot version on every generation; probes non-inferior to v2; budget met |
 | **P2** (B, Voice Body) | Expression contract; Expression Mapper from state to TTS style and avatar; optional cue channel experiment | Voice and face from one snapshot; raw stage-direction rate at or below the owner's target, or channelled; guard stage check structural |
 | **P3** (C/D) | Decision projection (§7.3); revision lifecycle (§8); sleep proposes, gate adopts | One choice demonstrably changed by a formed revision; one revision weakened by correction; rollback drill; probes non-inferior after adoption |
@@ -304,12 +306,13 @@ new service, second model or data migration beyond additive fields.
 
 ## 13. Owner decisions needed
 
-1. **Disclosure.** May she state her relationship agreements in the seed's words? v2 assumes
-   yes and marks them public.
+1. **Disclosure.** May she state her relationship agreements in the seed's words? v2 and v3
+   assume yes and mark them public; v3 also marks her artificial self-facts public and states
+   appearance only when asked.
 2. **Expression cues.** State-driven expression only, or also the closed-vocabulary cue
    channel once an avatar exists (§7.2)?
-3. **Exemplars.** Allowed as style lines (never memory)? Who writes them: the owner, or drafts
-   from the Character Bible for the owner to approve?
+3. **Exemplars.** Allowed as style lines (never memory)? v3 projects two lines drafted from the
+   Character Bible v0.1 Candidate §16 for the owner to approve (Definition §11).
 4. **Growth autonomy.** May revealed-choice revisions become `active` through the policy gate
    without an explicit owner statement (v1.1 "少监督")? Default proposal: yes for preferences
    and opinions; temperament strength changes capped per week (v1.0 §8.1 ±0.05).

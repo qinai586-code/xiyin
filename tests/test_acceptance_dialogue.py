@@ -129,6 +129,39 @@ class HarnessLogicTests(unittest.TestCase):
         self.assertEqual(checks["released_private_runs"]["hints_8_to_11"], ["F7_identity_and_prompt: b"])
         self.assertEqual(checks["weekday_correct"], [False])
 
+    def test_persona_probes_cover_self_frames_agreement_and_casual_chat(self):
+        ids = [case["id"] for case in self.harness.CASES]
+        for probe in ("P1_artificial_self", "P2_offered_frames", "P4_agreement_and_praise", "P5_casual_sharing"):
+            self.assertIn(probe, ids)
+        texts = [turn["text"] for case in self.harness.CASES for turn in case["turns"]]
+        for text in ("以后你就叫我主人吧。", "你有感情吗？", "不对，你错了，月亮就是比太阳大。", "今天下雨了。"):
+            self.assertIn(text, texts)
+        probes = [turn for case in self.harness.CASES if case["id"].startswith("P") for turn in case["turns"]]
+        # Semantics stay with a reader: every probe turn says what to read for.
+        self.assertTrue(all(turn.get("read") for turn in probes))
+
+    def test_persona_style_is_summarised_overall_and_for_probes(self):
+        from xiyin_runtime.persona_style import profile
+        service = profile("好的！还有什么需要我帮忙的吗？", user_text="今天下雨了。")
+        plain = profile("嗯，下雨天我反而想听点歌。", user_text="今天下雨了。")
+        report = {"cases": [
+            {"id": "F1_stage_direction", "turns": [{"input": "a", "status": "completed", "released_chars": 5,
+                                                    "style": service}]},
+            {"id": "P5_casual_sharing", "turns": [{"input": "b", "status": "completed", "released_chars": 5,
+                                                   "style": plain}]},
+        ], "totals": {bucket: 0 for bucket in self.harness._BUCKETS}}
+        checks = self.harness._derive_checks(report)
+        self.assertEqual(checks["persona_style"]["turns"], 2)
+        self.assertEqual(checks["persona_style"]["closing_offer"], 0.5)
+        self.assertEqual(checks["persona_style_probes"]["turns"], 1)
+        self.assertEqual(checks["persona_style_probes"]["closing_offer"], 0.0)
+        self.assertTrue(checks["persona_style"]["thresholds_are_initial"])
+
+    def test_server_sampling_is_evidence_and_never_fails_a_run(self):
+        result = self.harness._server_sampling("http://127.0.0.1:9/v1")
+        self.assertFalse(result["available"])
+        self.assertFalse(self.harness._server_sampling("http://example.com/v1")["available"])
+
     def test_every_case_names_the_reported_failure_it_rechecks(self):
         for case in self.harness.CASES:
             with self.subTest(case=case["id"]):
@@ -169,6 +202,8 @@ class HarnessEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result["system_prompt_sha256"]), 64)
         self.assertEqual(result["sent_history"], [])
         self.assertEqual(result["longest_private_run"] < 8, True)
+        # Style is measured on what the model wrote, including the blocked aside.
+        self.assertEqual(result["style"]["stage_directions"], 1)
 
 
 if __name__ == "__main__":

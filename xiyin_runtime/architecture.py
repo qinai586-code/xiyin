@@ -16,7 +16,7 @@ from .agenda import Agenda
 from .contracts import InputEvent
 from .self_state import SelfState
 from .director import Director, FileSkillPlanner, validate_plan
-from .context import RUNTIME_FACTS
+from .context import RUNTIME_FACTS, RUNTIME_FACTS_V3
 
 
 class DisabledModelProvider:
@@ -90,7 +90,34 @@ class RuntimeServices:
         weekday = "一二三四五六日"[now.weekday()]
         return (f"当前本机时间：{now.year}年{now.month}月{now.day}日，星期{weekday}，{now:%H:%M}（{zone}）。",)
 
-    def conversation_facts(self, session_id, scope):
+    def continuity_facts(self, session_id, scope):
+        """How long since this session last spoke, from the ledger and the clock.
+
+        v3 tells her that after a restart she knows how much time has passed.
+        That is only true if the time is in front of her; without this line
+        an elapsed time in a reply would be invented.
+        """
+        last = self.store.last_utterance_at(session_id, scope)
+        if last is None:
+            return ("这段会话之前没有对话记录。",)
+        now = self.clock()
+        try:
+            then = datetime.fromisoformat(last).astimezone(now.tzinfo)
+        except (TypeError, ValueError):
+            return ()
+        line = f"这段会话上次有人说话：{then.year}年{then.month}月{then.day}日 {then:%H:%M}"
+        seconds = (now - then).total_seconds()
+        if seconds >= 0:
+            line += "，距现在" + (
+                "不到两分钟" if seconds < 120 else
+                f"约{round(seconds / 60)}分钟" if seconds < 3600 else
+                f"约{round(seconds / 3600)}小时" if seconds < 172800 else
+                f"约{round(seconds / 86400)}天")
+        return (line + "。",)
+
+    def conversation_facts(self, session_id, scope, register="v1"):
+        if register == "v3":
+            return self._spoken_facts(session_id, scope)
         available = [item for item in self.body.capabilities() if item["available"]]
         facts = RUNTIME_FACTS
         if available or self.speech is not None:
@@ -113,6 +140,38 @@ class RuntimeServices:
             facts += "\n" + self.self_state.disposition(session_id, scope)["line"]
         except Exception:
             pass
+        return facts
+
+    def _spoken_facts(self, session_id, scope):
+        """The v3 register of conversation_facts: same facts, her situation.
+
+        The v1 state line ended "它不是主观体验", a metaphysical denial the
+        character does not hold (Bible §18: she does not know) and the model
+        turned into "作为AI，我没有真正的感情". Here the state is labelled as a
+        runtime estimate, which is what the engineering claim actually is.
+        """
+        available = [item for item in self.body.capabilities() if item["available"]]
+        facts = RUNTIME_FACTS_V3
+        if available or self.speech is not None:
+            facts = facts.replace("现在你只能打字交流和翻看记录，还看不到屏幕，也没接上形象和声音；对方同意也不会让你多出这些能力。",
+                                  "文字和记录已接上；动作要通过已登记的接口执行，对方同意也不会让你多出能力。")
+            for item in available:
+                facts += "\n已登记接口：" + item["adapter_id"] + "，可执行：" + "、".join(item["operations"]) + "。做完要看回执。"
+            if self.speech is not None:
+                facts += "\n声音已接上；合成、送达和播放是不同结果，都不代表对方听见了。"
+        state = self.store.read_document("state", f"self:xiyin:{scope}:{session_id}")
+        labels = {"idle": "空闲", "conversation": "在聊天", "rest": "休息", "stopped": "已停止"}
+        activity = state["value"].get("activity", "idle") if state else "idle"
+        try:
+            disposition = self.self_state.disposition(session_id, scope)
+        except Exception:
+            return facts
+        attention = disposition["attention"]
+        focus = "当前这句话" if attention == "current_input" else (attention or "没有特别集中的事")
+        acted = disposition["footing"] != "这段会话还没有执行过动作"
+        facts += ("\n当前状态（运行时估计，用来调语气，不用说出来）：" + labels.get(activity, activity)
+                  + f"，注意力在{focus}，语气{disposition['tone']}，状态{disposition['energy']}"
+                  + (f"，{disposition['footing']}" if acted else "") + "。")
         return facts
 
     async def emergency_stop(self, reason="owner requested stop"):

@@ -58,7 +58,8 @@ class ExpressionContextTests(unittest.TestCase):
         self.assertFalse(any("星塔" in str(item) for item in records))
         self.assertEqual(messages[1], {"role": "assistant", "content": "我已替你保存偏好，昨天还通关了星塔。"})
         self.assertEqual(self.store.operation_receipts("one"), [])
-        self.assertIn("旧助手自述", messages[0]["content"])
+        # v1/v2 say "旧助手自述只说明说过…", v3 "你说过的话只说明说过…".
+        self.assertIn("只说明说过，不证明做过", messages[0]["content"])
         self.assertEqual(self.store.memories(), [])
 
     def test_user_report_retains_origin_and_does_not_become_an_operation_receipt(self):

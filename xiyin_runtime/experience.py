@@ -308,7 +308,9 @@ class ExperienceStore:
         released text, never the rejected remainder). A turn that delivered
         nothing is left out on both sides, so the next model call never sees an
         unanswered instruction. The ledger itself is unchanged.
-        Legacy inputs without a request id retain their observation semantics.
+        Legacy inputs without a request id retain their observation semantics
+        (remember commands are request-linked from now on; older ones cannot
+        be told apart from chat statements that later became memory evidence).
         Completed text with origin=generated is a complete textual response,
         not evidence of audio playback, human attention or a successful action.
         Extra metadata can be stripped to role/content by an API adapter.

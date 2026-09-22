@@ -35,6 +35,7 @@ The reference projects treat body expression as a typed channel outside the spok
 - A bold glossary of gesture words ("- **摇头**：…") is blocked.
 - Unclosed quotes and brackets hold the rest of the reply.
 - A barge-in before any text was released drops the question from history.
+- Remember commands written before this change carry no request id. They cannot be told apart from legacy chat statements, so they stay in history until they fall outside its 8-message window.
 
 **Next acceptance.** `tools/acceptance_dialogue.py` records, per turn, the raw generation, TurnPolicy, the history actually sent, the system-prompt hash, the longest private run in released text, and a weekday check. Run `--persona-projection v1` and `v2` on the same Qwen3.5-4B, backend, quantization and sampling. Then repeat the better arm with Qwen3.5-9B. Label model-layer behaviour from raw text, not from guard decisions.
 

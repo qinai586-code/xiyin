@@ -1,5 +1,7 @@
 # Open Source Integration
 
+2026-09-22 bounded follow-up: rechecked [Neuro SDK](https://github.com/VedalAI/neuro-sdk/blob/main/API/SPECIFICATION.md), [AIRI message authority types](https://github.com/moeru-ai/airi/blob/26f37192e041959943fe66c5a74d3d57132e5e7b/packages/core-agent/src/messages/types.ts), and [Open-LLM-VTuber output types](https://github.com/Open-LLM-VTuber/Open-LLM-VTuber/blob/main/src/open_llm_vtuber/agent/output_types.py). These support separating source/authority, character text and body actions; they do not reveal Neuro's private personality implementation. This patch uses that separation for trusted prompt provenance and local mention classification, with no copied upstream code or new runtime dependency. The [Qwen3.5-4B model card](https://huggingface.co/Qwen/Qwen3.5-4B) does not establish XIYIN-specific instruction-following quality. Keep actual-weight comparisons separate from guard correctness and do not claim a model-capacity diagnosis from synthetic tests.
+
 本次区分真实接口依赖、设计借鉴和未接入候选。没有宣称把参考清单中的所有仓库拼装进 Runtime，也没有复制第三方整套角色人格。以下链接对应实际核对的官方资料。
 
 ## 本轮裁定：不新增任何集成

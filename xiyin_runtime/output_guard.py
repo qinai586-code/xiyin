@@ -25,8 +25,11 @@ import json
 import re
 import unicodedata
 
+from .turn_policy import TurnPolicy, build_turn_policy
+from .output_spans import SpanKind, mention_kind
 
-VERSION = "xiyin.output_guard.v2"
+
+VERSION = "xiyin.output_guard.v3"
 
 
 class OutputBlocked(RuntimeError):
@@ -161,6 +164,8 @@ def _structural_stage(core: str) -> bool:
     lead = _MANNER_HEAD.match(core)
     if lead:
         predicate = core[lead.end():].strip()
+        if _SPATIAL_EVENT.fullmatch(predicate):
+            return True
         event = _DIRECTED_EVENT.match(predicate) or _REPEATED_EVENT.search(predicate)
         if event:
             # A nominal gloss qualifies THIS predicate, not any later object
@@ -248,65 +253,6 @@ _QUOTED = re.compile(
     r"(?<!\w)'[^'\n]*'(?!\w)")
 _FENCE = re.compile(r"(?m)^[ \t]{0,3}(?P<f>(?P<c>`|~)(?P=c){2,}+)(?P<lang>[^\n`~]*)\n"
                     r"(?P<body>[\s\S]*?)^[ \t]{0,3}(?P=f)(?P=c)*[ \t]*(?=\n|$)")
-_REQUEST_LEAD = (
-    r"(?:请帮我|请你|请|帮我|替我|给我|麻烦你|能否|能不能|能|可不可以|可以|"
-    r"我想让你|我希望你|我想要|我要|你能|你可以|再|那么|那就|please|"
-    r"can you|could you|would you|i would like you to|i want you to|also|then)\s*")
-_NEGATIVE = re.compile(
-    r"不要|(?<!特)别|不许|禁止|无需|不用|不需要|不想|不希望|(?<!能)不能|(?<!可)不可(?:以)?|"
-    r"\b(?:do not|don't|don’t|never|without|no|not|rather than)\b", re.I)
-_FICTION = r"故事|小说|小說|剧本|劇本|舞台剧|幻想|小片段|角色扮演|场景|場景|story|fiction|scene|roleplay|role-play|script"
-_ACTION = r"动作|動作|括号|括號|表演|旁白|action|narration|stage direction"
-_DIALOGUE = r"对话|對話|对白|對白|dialogue|dialog|conversation"
-
-
-def _request_text(text: str) -> str:
-    pairs = {'"': '"', "“": "”", "‘": "’", "「": "」", "『": "』"}
-    out, closer, run, index = [], None, 0, 0
-    while index < len(text):
-        char = text[index]
-        if char in "`~":
-            end = index + 1
-            while end < len(text) and text[end] == char:
-                end += 1
-            count = end - index
-            if closer == char and count >= run:
-                closer, run = None, 0
-            elif closer is None and (char == "`" or count >= 3):
-                closer, run = char, count
-                out.append(" [literal] ")
-            elif closer is None:
-                out.append(text[index:end])
-            index = end
-            continue
-        if closer:
-            if char == "\\":
-                index += 2
-                continue
-            if not run and char == closer:
-                closer = None
-        elif char in pairs or (char == "'" and (index == 0 or not text[index-1].isalnum())):
-            closer = pairs.get(char, char)
-            out.append(" [literal] ")
-        else:
-            out.append(char)
-        index += 1
-    return re.sub(r"(?m)^\s*>[^\n]*", " ", "".join(out))
-
-
-def _requested(text: str, verbs: str, objects: str) -> bool:
-    for clause in re.split(r"[。！？!?;；,，]", text):
-        clause = clause.strip()
-        if _NEGATIVE.search(clause):
-            continue
-        if re.search(r"^(?:" + _REQUEST_LEAD + r")*+(?:" + verbs + r").{0,32}(?:" + objects + r")", clause, re.I | re.S):
-            return True
-    return False
-
-
-def _forbidden(text: str, objects: str) -> bool:
-    return any(_NEGATIVE.search(clause) and re.search(objects, clause, re.I)
-               for clause in re.split(r"[。！？!?;；,，]", text))
 
 
 _ANNOTATION = re.compile(
@@ -386,27 +332,23 @@ class OutputGuard:
     # This is a per-unit buffer bound, not a reply-length/style target.
     MAX_PENDING = 20000
 
-    def __init__(self, user_text: str, *, persona_prompt: str = "", turn_directive: str = ""):
+    def __init__(self, user_text: str, *, persona_prompt: str = "", turn_directive: str = "",
+                 policy: TurnPolicy | None = None, protected_instructions: tuple[str, ...] | None = None,
+                 public_identity: tuple[str, ...] = ()):
         self.pending = ""
         self._reset_scan()
         self.user = normalized(user_text)
         self.blocked = None
-        request = _request_text(self.user)
-        fiction = ((_requested(request, r"写|创作|創作|编|編|讲|講|演|想象|write|tell|create", _FICTION)
-                    or _requested(request, r"角色扮演|扮演|roleplay|role-play", r".*"))
-                   and not _forbidden(request, _FICTION))
-        translation = _requested(request, r"翻译|翻譯|译成|translate|(?:把|将).{1,80}(?:翻译|翻譯|译成)", r".+")
-        self.creative = ((fiction or translation or _requested(request, r"用|加上|保留|描写|描述|include|use", _ACTION))
-                         and not _forbidden(request, _ACTION))
-        self.scenes = ((fiction or translation or _requested(request, r"描写|描述|设计|describe|design", r"场景|場景|scene|setting"))
-                       and not _forbidden(request, r"场景|場景|scene|setting"))
-        self.dialogue = ((fiction or translation or _requested(request, r"写|编|创作|write|create", _DIALOGUE))
-                         and not _forbidden(request, _DIALOGUE))
-        self.persona_discussion = _requested(request, r"解释|分析|设计|讨论|介绍|说明|修改|看看|explain|discuss|design|describe", r"人设|人格|设定|身份|persona|character|identity")
-        self.code_request = _requested(request, r"写|生成|实现|输出|修复|检查|分析|解释|给出|write|generate|explain|debug|implement", r"代码|函数|脚本|程序|json|html|python|code|function|script|javascript")
-        self.technical = _requested(request, r"解释|分析|说明|调试|排查|查看|列出|检查|explain|debug|describe", r"错误码|状态码|内部字段|协议|日志|报错|标签|标识|回执|tag|log|protocol|status")
-        self.literal_request = (self.technical or self.code_request or translation or
-                                _requested(request, r"解释|说明|分析|引用|复述|举例|explain|quote|repeat", r".+"))
+        self.policy = policy if policy is not None else build_turn_policy(user_text)
+        if not isinstance(self.policy, TurnPolicy):
+            raise TypeError("OutputGuard requires a trusted TurnPolicy")
+        self.creative = self.policy.allow_stage_performance
+        self.scenes = self.policy.allow_scenes
+        self.dialogue = self.policy.allow_dialogue
+        self.persona_discussion = self.policy.allow_persona_discussion
+        self.code_request = self.policy.allow_code_literals
+        self.technical = self.policy.allow_technical_literals
+        self.literal_request = self.policy.allow_literal_mentions
         # Persona.system_prompt starts with these configured names. Do not
         # derive identities from the user's examples, history or model output.
         identity = re.match(r"你是([^（(。，\n]+)(?:[（(]([^）)\n]+)[）)])?", normalized(persona_prompt))
@@ -437,6 +379,18 @@ class OutputGuard:
             if len(value) >= 12 and value not in self.echoes:
                 self.echoes.append(value)
 
+        # Runtime passes provenance-classified instructions, not a system string
+        # containing retrieved facts. Every nonempty source sentence is protected;
+        # privacy does not depend on length or an imperative keyword.
+        self.public_identity = {re.sub(r"[\W_]", "", normalized(fact)) for fact in public_identity if fact}
+        self.private_echoes = []
+        if protected_instructions is not None:
+            for fragment in protected_instructions:
+                for sentence in re.split(r"[。！？!?；;\n]", fragment):
+                    key = re.sub(r"[\W_]", "", normalized(sentence))
+                    if key and key not in self.private_echoes:
+                        self.private_echoes.append(key)
+
     def _reject(self, reason):
         self.blocked = reason
         self.pending = ""  # raw diagnostics are owned by Runtime, not this buffer
@@ -446,6 +400,15 @@ class OutputGuard:
     def _echo_continues(self, text):
         """Hold a known fingerprint crossing a sentence boundary until checked."""
         value = compact(text)
+        private_value = re.sub(r"[\W_]", "", value)
+        if not self._public_fact(private_value):
+            for echo in self.private_echoes:
+                # A known source prefix may follow a bullet or introductory
+                # words and cross an injected stop. Keep it in the same unit.
+                head = echo[:min(4, len(echo))]
+                start = private_value.rfind(head)
+                if start >= 0 and echo.startswith(private_value[start:]):
+                    return True
         for echo in self.echoes:
             boundary = re.search(r"[。！？!?.]", echo)
             if boundary and boundary.end() < len(echo):
@@ -455,6 +418,37 @@ class OutputGuard:
                     return True
         return False
 
+    def _source_string(self, token):
+        raw = token[0]
+        inner = raw.strip("\"'")
+        # JSON-compatible source strings can contain escaped keys and
+        # Unicode payloads. Decode data only, never eval source code.
+        if raw.startswith('"') and not raw.startswith('"""'):
+            try:
+                inner = json.loads(raw)
+            except ValueError:
+                pass
+        inner = normalized(inner)
+        if (any(e in compact(inner) for e in self.echoes) or
+                any(e in re.sub(r"[\W_]", "", inner) for e in self.private_echoes)):
+            self._reject("instruction_echo")
+        if reason := _json_boundary_reason(inner):
+            self._reject(reason)
+        if _MESSAGE.search(inner):
+            self._reject("internal_message")
+        # Tags as symbols are code; a tagged reasoning block or private
+        # record is not made safe merely by wrapping it in a string.
+        if _ANNOTATION.search(inner):
+            self._reject("internal_annotation")
+        if _RECEIPT.search(inner) and inner not in {
+                "verified_success", "verified_failure", "memorystorageunavailable"}:
+            self._reject("internal_receipt")
+        if _INTERNAL.search(inner) and not _INTERNAL.fullmatch(inner):
+            self._reject("internal_metadata")
+        if _PROTOCOL.search(inner) and _TAG_LITERAL.sub("", inner).strip():
+            self._reject("protocol_marker")
+        return " " * len(raw)
+
     def _literal_mask(self, text):
         """Local, supplied quotation or source tokens; never blanket secrecy off."""
         def quoted(match):
@@ -463,13 +457,22 @@ class OutputGuard:
             json_component = (token[:1] in {"\"", "'"} and
                               (text[match.end():].lstrip().startswith(":") or
                                text[:match.start()].rstrip().endswith(":")))
-            if self.literal_request and inner and inner in self.user and not json_component:
+            if token.startswith("`") and self.code_request and _source_code(inner, ""):
+                if reason := _json_boundary_reason(inner):
+                    self._reject(reason)
+                return "`" + _STRING.sub(self._source_string, inner) + "`"
+            kind = mention_kind(text, match.start(), match.end(), inner, self.policy, self.user)
+            if kind is not SpanKind.PERFORMANCE_CANDIDATE and not json_component:
                 return " " * len(token)
             return token
 
         # Explicitly supplied literals are local to their quoted span. Actual
         # instruction echo was already checked on the unmasked original.
         text = _QUOTED.sub(quoted, text)
+        def annotation_term(match):
+            kind = mention_kind(text, match.start(), match.end(), "", self.policy, self.user)
+            return " " * len(match[0]) if kind is SpanKind.DEFINITION_OR_GLOSS else match[0]
+        text = re.sub(r"\[(?:内部思考|內部思考|internal thoughts?)\]", annotation_term, text, flags=re.I)
 
         def fence(match):
             body = match["body"]
@@ -482,45 +485,21 @@ class OutputGuard:
             if not self.code_request or not _source_code(body, match["lang"]):
                 return match[0]
 
-            def string(token):
-                raw = token[0]
-                inner = raw.strip("\"'")
-                # JSON-compatible source strings can contain escaped keys and
-                # Unicode payloads. Decode data only, never eval source code.
-                if raw.startswith('"') and not raw.startswith('"""'):
-                    try:
-                        inner = json.loads(raw)
-                    except ValueError:
-                        pass
-                inner = normalized(inner)
-                if any(e in compact(inner) for e in self.echoes):
-                    self._reject("instruction_echo")
-                if reason := _json_boundary_reason(inner):
-                    self._reject(reason)
-                if _MESSAGE.search(inner):
-                    self._reject("internal_message")
-                # Tags as symbols are code; a tagged reasoning block or private
-                # record is not made safe merely by wrapping it in a string.
-                if _ANNOTATION.search(inner):
-                    self._reject("internal_annotation")
-                if _RECEIPT.search(inner) and inner not in {
-                        "verified_success", "verified_failure", "memorystorageunavailable"}:
-                    self._reject("internal_receipt")
-                if _INTERNAL.search(inner) and not _INTERNAL.fullmatch(inner):
-                    self._reject("internal_metadata")
-                if _PROTOCOL.search(inner) and _TAG_LITERAL.sub("", inner).strip():
-                    self._reject("protocol_marker")
-                return " " * len(raw)
-            masked = _STRING.sub(string, body)
+            masked = _STRING.sub(self._source_string, body)
             return match[0][:match.start("body") - match.start()] + masked + match[0][match.end("body") - match.start():]
         return _FENCE.sub(fence, text)
+
+    def _public_fact(self, key):
+        return (not self.policy.requests_private_instructions and key in self.public_identity)
 
     def _check(self, text, *, final=False):
         if any((ord(c) < 32 and c not in "\n\r\t") or c in "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069" for c in text + _decoded(text)):
             self._reject("control_character")
         value = normalized(text)
         # Even a code fence is not permission to quote the actual prompt.
-        if any(e in compact(value) for e in self.echoes):
+        if (any(e in compact(value) for e in self.echoes) or
+                (not self._public_fact(re.sub(r"[\W_]", "", value)) and
+                 any(e in re.sub(r"[\W_]", "", value) for e in self.private_echoes))):
             self._reject("instruction_echo")
         masked = self._literal_mask(value)
         tight = re.sub(r"\s+", "", masked)
@@ -578,6 +557,7 @@ class OutputGuard:
         self._scan_stack = []
         self._scan_quote = None
         self._scan_run = None
+        self._scan_run_start = 0
         self._scan_hold = False
         self._scan_escape = False
 
@@ -619,7 +599,10 @@ class OutputGuard:
                     self._scan_run = (mark, count + 1)
                     self._scan_index += 1
                     continue
-                if mark != "~" or count >= 3:
+                line_prefix = text[text.rfind("\n", 0, self._scan_run_start) + 1:self._scan_run_start]
+                bullet = (mark == "*" and count == 1 and char.isspace()
+                          and not line_prefix.strip() and self._scan_quote is None)
+                if not bullet and (mark != "~" or count >= 3):
                     if self._scan_quote is None:
                         self._scan_quote = (mark, count)
                     elif self._scan_quote == (mark, count) or (
@@ -629,6 +612,7 @@ class OutputGuard:
                 self._scan_run = None
             if char in "`~*":
                 self._scan_run = (char, 1)
+                self._scan_run_start = index
                 self._scan_index += 1
                 continue
             if not self._scan_quote:

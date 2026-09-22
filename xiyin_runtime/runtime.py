@@ -27,7 +27,9 @@ from .lifecycle import RuntimeLease
 from .persona import load_persona
 from .output_guard import OutputGuard, OutputBlocked, VERSION as OUTPUT_GUARD_VERSION
 from .provider import GenerationBudget, LocalModelClient, ProviderCancelled, ProviderTruncated
+from .prompt_provenance import PromptSource, runtime_projection
 from .response_plan import ResponsePlan, estimate_tokens, plan_response, updated_rate
+from .turn_policy import build_turn_policy
 
 
 _logger = logging.getLogger(__name__)
@@ -159,7 +161,10 @@ class XIYINRuntime(RuntimeServices):
                   if m.get("kind") in {"persona", "preference", "opinion", "relationship"}]
         history = [{"role": h["role"], "content": h["content"]}
                    for h in self.store.history(session_id, scope=scope, limit=self.settings.history_messages)]
-        return {"persona": self.persona.system_prompt(growth), "history": history,
+        persona = self.persona.system_projection(growth)
+        return {"persona": persona.text, "protected_instructions": persona.protected_instructions,
+                "public_identity": tuple(f.text for f in persona.fragments if f.source is PromptSource.PUBLIC_IDENTITY),
+                "history": history,
                 "records": self._records(text, session_id, scope),
                 "facts": self.conversation_facts(session_id, scope)}
 
@@ -255,8 +260,11 @@ class XIYINRuntime(RuntimeServices):
             prepared = self._prepare(prompt, session_id, scope)
             plan = self._plan_turn(prompt, self._compose(prepared, prompt), session_id, scope)
             messages = self._compose(prepared, prompt, plan.directive)
+            protected = (prepared["protected_instructions"]
+                         + runtime_projection(prepared["facts"], plan.directive).protected_instructions)
             guard = OutputGuard(prompt, persona_prompt=messages[0]["content"],
-                                turn_directive=plan.directive)
+                                turn_directive=plan.directive, protected_instructions=protected,
+                                policy=build_turn_policy(prompt), public_identity=prepared["public_identity"])
             self.sleep_controller.wake("user input")
             evidence_id = self.store.append_event("user", prompt, session_id=session_id,
                                     scope=scope, origin="user_report", status="completed", request_id=request_id)

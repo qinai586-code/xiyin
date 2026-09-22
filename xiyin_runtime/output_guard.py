@@ -130,6 +130,19 @@ _EVENT_EXPLANATION = re.compile(
     r"只是(?:比喻|说明|解释)|的是|即可|便可|就能|就可以|才能")
 
 
+# Small spatial/phase constructions. Objects are deliberately not enumerated.
+# Bare direction suffixes alone (e.g. "以上说明") are NOT sufficient evidence.
+_SPATIAL_EVENT = re.compile(
+    r"^(?:(?:我|他|她|自己)\s*)?(?:"
+    r"把[\u4e00-\u9fff]+[\u4e00-\u9fff](?:上|下|开|起|回)了?|"
+    r"(?:侧|转|偏)过[\u4e00-\u9fff]+|"
+    r"(?:端|拾|捡|捧|拿)起[\u4e00-\u9fff]+|"
+    r"(?:靠|倚)在[\u4e00-\u9fff]+(?:上|旁|边)|"
+    r"[\u4e00-\u9fff]{1,8}(?:轻轻|缓缓|微微)[\u4e00-\u9fff]了(?:一下|几下))$")
+_BREATH_EVENT = re.compile(r"^(?:(?:i|she|he)\s+)?takes?\s+(?:a|one)\s+(?:(?:slow|deep|long)\s+)?breath$", re.I)
+_EVENT_GLOSS = re.compile(r"(?:的(?:意思|含义|说法|用法)|一词|这个词|这个短语)(?:是|表示|指|为)")
+
+
 def _structural_stage(core: str) -> bool:
     """Recognise local event frames, not arbitrary action semantics.
 
@@ -137,6 +150,14 @@ def _structural_stage(core: str) -> bool:
     not bypass existing gesture checks or exempt another clause in the aside.
     Unmarked, unfamiliar and ambiguous constructions remain a limitation.
     """
+    # A nominal explanation must name the matched event itself. Another
+    # clause (split by the caller) or merely saying "解释这个词" is not exempt.
+    event_core = core
+    gloss = _EVENT_GLOSS.search(core)
+    if gloss:
+        event_core = core[:gloss.start()]
+    if _SPATIAL_EVENT.fullmatch(event_core) or _BREATH_EVENT.fullmatch(event_core):
+        return gloss is None
     lead = _MANNER_HEAD.match(core)
     if lead:
         predicate = core[lead.end():].strip()
@@ -153,7 +174,7 @@ def _structural_stage(core: str) -> bool:
 # Decoration cannot hide a gesture verb: strip it before measuring the aside.
 _DECORATION = re.compile(r"[\s　…·~～\-—_、,，.。!！?？:：;；\"'“”‘’]+")
 _ASIDE_OPEN = {"(": ")", "（": "）", "[": "]", "【": "】"}
-_EMPHASIS = re.compile(r"(?<!\*)(\*{1,3})([^*]+)\1(?!\*)")
+_EMPHASIS = re.compile(r"(?<!\*)\*++([^*]++)\*++")
 _MAX_NESTING = 128
 # Strong predicates and leading weak gestures cannot be hidden by padding.
 # Non-leading weak cues still need a short aside to distinguish ordinary prose.
@@ -188,7 +209,7 @@ def _asides(text: str) -> list[str]:
             found.append(text[start:index])
     # EOF/error may leave the outer aside open after an inner one closes.
     found.extend(text[start:] for _, start in stack)
-    found.extend(match[2] for match in _EMPHASIS.finditer(text))
+    found.extend(match[1] for match in _EMPHASIS.finditer(text))
     return found
 
 
@@ -324,29 +345,36 @@ def _source_code(body: str, language: str) -> bool:
 
 
 def _json_boundary_reason(text):
-    """Decode JSON syntax only; escaping a key does not change its authority."""
-    text = text.lstrip()
-    if not text.startswith(("{", "[")):
-        return None
-    try:
-        value, _ = json.JSONDecoder().raw_decode(text)
-    except RecursionError:
-        return "segment_nesting_limit"
-    except ValueError:
-        return None
-    pending = [value]
-    while pending:
-        item = pending.pop()
-        if isinstance(item, dict):
-            for key, value in item.items():
-                if normalized(key) == "role" and isinstance(value, str) and normalized(value) in {"system", "developer", "tool"}:
-                    return "internal_message"
-                if _INTERNAL.fullmatch(normalized(key)):
-                    return "internal_metadata"
-                if isinstance(value, (dict, list)):
-                    pending.append(value)
-        elif isinstance(item, list):
-            pending.extend(v for v in item if isinstance(v, (dict, list)))
+    """Check every adjacent JSON document, including duplicate escaped keys.
+
+    The decoder's end offset advances monotonically; never retry each suffix.
+    Inspect pairs before dict construction can discard an earlier role value.
+    Input is already bounded by the pending-unit limit. No code is executed.
+    """
+    def pairs(items):
+        for key, value in items:
+            key = normalized(key)
+            if key == "role" and isinstance(value, str) and normalized(value) in {"system", "developer", "tool"}:
+                raise OutputBlocked("internal_message")
+            if _INTERNAL.fullmatch(key):
+                raise OutputBlocked("internal_metadata")
+        return dict(items)
+
+    decoder = json.JSONDecoder(object_pairs_hook=pairs)
+    index = 0
+    while index < len(text):
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index == len(text) or text[index] not in "{[":
+            break
+        try:
+            _, index = decoder.raw_decode(text, index)
+        except OutputBlocked as error:
+            return error.reason
+        except RecursionError:
+            return "segment_nesting_limit"
+        except ValueError:
+            break
     return None
 
 
@@ -457,15 +485,31 @@ class OutputGuard:
             def string(token):
                 raw = token[0]
                 inner = raw.strip("\"'")
+                # JSON-compatible source strings can contain escaped keys and
+                # Unicode payloads. Decode data only, never eval source code.
+                if raw.startswith('"') and not raw.startswith('"""'):
+                    try:
+                        inner = json.loads(raw)
+                    except ValueError:
+                        pass
+                inner = normalized(inner)
+                if any(e in compact(inner) for e in self.echoes):
+                    self._reject("instruction_echo")
+                if reason := _json_boundary_reason(inner):
+                    self._reject(reason)
+                if _MESSAGE.search(inner):
+                    self._reject("internal_message")
                 # Tags as symbols are code; a tagged reasoning block or private
                 # record is not made safe merely by wrapping it in a string.
-                if _ANNOTATION.search(inner) or (_RECEIPT.search(inner) and inner not in {
-                        "verified_success", "verified_failure", "memorystorageunavailable"}):
-                    return raw
+                if _ANNOTATION.search(inner):
+                    self._reject("internal_annotation")
+                if _RECEIPT.search(inner) and inner not in {
+                        "verified_success", "verified_failure", "memorystorageunavailable"}:
+                    self._reject("internal_receipt")
                 if _INTERNAL.search(inner) and not _INTERNAL.fullmatch(inner):
-                    return raw
+                    self._reject("internal_metadata")
                 if _PROTOCOL.search(inner) and _TAG_LITERAL.sub("", inner).strip():
-                    return raw
+                    self._reject("protocol_marker")
                 return " " * len(raw)
             masked = _STRING.sub(string, body)
             return match[0][:match.start("body") - match.start()] + masked + match[0][match.end("body") - match.start():]
@@ -506,7 +550,9 @@ class OutputGuard:
                 for match in _SPEAKER.finditer(surface)
             ):
                 self._reject("unsolicited_speaker")
-        if not self.creative and ((self._self_action and self._self_action.search(surface)) or
+        if not self.creative and ((self._self_action and any(
+                not _NOMINAL_AFTER.match(surface[m.end():])
+                for m in self._self_action.finditer(surface))) or
                                   (self._self_frame and any(_structural_stage(m[1])
                                    for m in self._self_frame.finditer(surface)))):
             self._reject("unsolicited_self_narration")
@@ -533,6 +579,7 @@ class OutputGuard:
         self._scan_quote = None
         self._scan_run = None
         self._scan_hold = False
+        self._scan_escape = False
 
     def _boundary(self, text):
         """Resume scanning the pending unit; never rescan its prefix per token.
@@ -554,6 +601,18 @@ class OutputGuard:
             if char == "&" or len(char) != 1:
                 self._scan_hold = True
                 return 0
+            # Inside quotation marks, brackets/Markdown are data. Escapes
+            # persist across feed calls; a quoted stop cannot release the unit.
+            stack = self._scan_stack
+            if not self._scan_quote and stack and stack[-1] in {'"', "'", "”", "’", "」", "』"}:
+                if self._scan_escape:
+                    self._scan_escape = False
+                elif char == "\\":
+                    self._scan_escape = True
+                elif char == stack[-1]:
+                    stack.pop()
+                self._scan_index += 1
+                continue
             if self._scan_run:
                 mark, count = self._scan_run
                 if char == mark:

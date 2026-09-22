@@ -91,6 +91,41 @@ _PERFORMANCE_BEFORE = re.compile(
     r"(?:轻轻|缓缓|微微|随后|gently|quietly)\s*$", re.I)
 _GLOSS_BEFORE = re.compile(
     r"^(?:即|也就是|意思是|译作|译为|英文|日文|中文|例如|比如|i\.e\.|e\.g\.)\s*$", re.I)
+# A definition can qualify its term: "指微微一笑的样子". The leading
+# "指" is a definition operator, not an actor; an adverb alone is still acting.
+_GLOSS_TERM_BEFORE = re.compile(
+    r"^(?:指|是指|意为|意思是|即|也就是|译作|译为)\s*(?:轻轻|缓缓|微微)?\s*$")
+
+# Bounded local event frames, not a growing inventory of props/body parts.
+# Manner + directed/reduplicated predicate covers unseen verbs and objects;
+# person + source-comparison + result complement covers acted state changes.
+_MANNER_HEAD = re.compile(r"^(?:(?:我|他|她|自己)\s*)?(?:轻轻|缓缓|悄悄|慢慢|顺手)(?:地)?")
+_REPEATED_EVENT = re.compile(r"([\u4e00-\u9fff])了\1")
+_DIRECTED_EVENT = re.compile(r"^[\u4e00-\u9fff](?:下|上|开|回|起)(?=[\u4e00-\u9fff])")
+_PERSON_RESULT = re.compile(
+    r"^(?:我|他|她|自己|整个人)(?:像|仿佛)(?:是)?从.{1,80}"
+    r"(?:下来|下去|起来|出来|出去|进来|进去|过来|过去|回来|回去)$")
+_EVENT_EXPLANATION = re.compile(
+    r"的(?:意思|含义|说法|写法|用法)|(?:一词|这个词|这个短语)|"
+    r"只是(?:比喻|说明|解释)|的是|即可|便可|就能|就可以|才能")
+
+
+def _structural_stage(core: str) -> bool:
+    """Recognise only short event frames, not arbitrary action semantics.
+
+    Explanatory/instructional tails limit the new manner rule only. They do
+    not bypass existing gesture checks or exempt another clause in the aside.
+    Unmarked, unfamiliar and ambiguous constructions remain a limitation.
+    """
+    if len(core) > _STRONG_ASIDE_CHARS:
+        return False
+    lead = _MANNER_HEAD.match(core)
+    if lead:
+        predicate = core[lead.end():].strip()
+        if not _EVENT_EXPLANATION.search(predicate) and (
+                _DIRECTED_EVENT.match(predicate) or _REPEATED_EVENT.search(predicate)):
+            return True
+    return bool(_PERSON_RESULT.fullmatch(core))
 
 # Decoration cannot hide a gesture verb: strip it before measuring the aside.
 _DECORATION = re.compile(r"[\s　…·~～\-—_、,，.。!！?？:：;；\"'“”‘’]+")
@@ -137,13 +172,16 @@ def is_stage_direction(content: str) -> bool:
     # Split before decoration removal so a gloss cannot absorb the next clause.
     for clause in re.split(r"[,，;；。\n]|随后|然后|接着|同时", content):
         core = _aside_core(clause)
+        if _structural_stage(core):
+            return True
         for pattern, limit in ((_GESTURE_STRONG, _STRONG_ASIDE_CHARS),
                                (_GESTURE_WEAK, _WEAK_ASIDE_CHARS)):
             if len(re.sub(r"\s+", "", core)) > limit:
                 continue
             for match in pattern.finditer(core):
                 before, after = core[:match.start()].strip(), core[match.end():]
-                if (_GLOSS_AFTER.match(after) and not _PERFORMANCE_BEFORE.search(before)
+                if (_GLOSS_AFTER.match(after)
+                        and (not _PERFORMANCE_BEFORE.search(before) or _GLOSS_TERM_BEFORE.fullmatch(before))
                         and not re.search(r"[了着]", match[0])):
                     continue
                 if _GLOSS_BEFORE.fullmatch(before) and not after.strip():

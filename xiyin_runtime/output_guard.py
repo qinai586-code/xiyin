@@ -14,6 +14,9 @@ Paraphrases, unmarked scene prose, indirect/unknown-speaker narration, encoded
 payloads and unusual quotation/negation syntax can escape. Unfamiliar source
 syntax and ambiguous speaker headings may be rejected. Configured names are
 read from Persona's trusted identity projection, never from output or history.
+Entity-bearing units are held through finish (bounded by MAX_PENDING); this
+trades encoded-text streaming latency for a consistent decoding boundary.
+Nesting is capped explicitly, rather than silently skipping deep content.
 """
 from __future__ import annotations
 
@@ -32,9 +35,25 @@ class OutputBlocked(RuntimeError):
         super().__init__(reason)  # Only a rule code may enter a public error.
 
 
+def _decoded(text: str) -> str:
+    # Canonicalize BEFORE decoding too: Cf/full-width spelling can hide &lt;.
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(c for c in text if unicodedata.category(c) != "Cf")
+    # html.unescape uses int(): huge decimal references otherwise raise at the
+    # interpreter's digit limit. Trim zero padding without parsing huge ints.
+    def number(match):
+        token = match[1]
+        base = token[:1].lower() == "x"
+        digits = (token[1:] if base else token).lstrip("0") or "0"
+        if len(digits) > (6 if base else 7):
+            return "\ufffd"
+        return "&#" + ("x" if base else "") + digits + ";"
+    text = re.sub(r"&#([xX][0-9a-fA-F]+|[0-9]+);?", number, text)
+    return unicodedata.normalize("NFKC", html.unescape(text))
+
+
 def normalized(text: str) -> str:
-    text = unicodedata.normalize("NFKC", html.unescape(text)).casefold()
-    return "".join(c for c in text if unicodedata.category(c) != "Cf")
+    return "".join(c for c in _decoded(text).casefold() if unicodedata.category(c) != "Cf")
 
 
 def compact(text: str) -> str:
@@ -68,7 +87,7 @@ _GESTURE_STRONG = re.compile(
     r"抬[起了]?头|低[下了]?头|撅[起了]?嘴|嘟[起了]?嘴|鼓[起了]?(?:嘴|脸)|"
     r"拍[了]?拍?手|挥[了]?挥?手|叉(?:着)?腰|脸红|红了脸|伸[出了]?手|"
     r"摸[了]?摸?(?:头|脑袋)|眯[起了]?眼|深吸[了]?[一]?口?气|松[了]?口气|指[了]?指|指向|"
-    r"叹[了]?口?气|清[了]?清?嗓子|抱[住了]|蹭[了]?蹭|转(?:过)?身|歪身子|"
+    r"(?:长|深)?(?:舒|呼|吸|吐)(?:出|入)?了?一口(?:长)?气|叹[了]?口?气|清[了]?清?嗓子|抱[住了]|蹭[了]?蹭|转(?:过)?身|歪身子|"
     r"smil(?:e|es|ing)\b|grins?\b|blinks?\b|winks?\b|nods?\b|shrugs?\b|"
     r"tilts?\s+(?:\w+\s+)?head\b|blush(?:es|ing)?\b|sighs?\b|giggles?\b|"
     r"chuckles?\b|waves?\s+(?:a\s+)?hand\b|facepalms?\b|pouts?\b|leans?\s+in\b",
@@ -83,6 +102,7 @@ _GESTURE_WEAK = re.compile(
     r"手指.{0,3}(?:敲|点|划|绕|捏|戳|停)",
     re.I)
 # Exempt the gesture TERM in a gloss, not every action in the same aside.
+_NOMINAL_AFTER = re.compile(r"^\s*(?:的(?:意思|含义|说法|用法)|一词|这个词|这个短语)")
 _GLOSS_AFTER = re.compile(
     r"^\s*(?:表示|表达|意为|意味着|是(?:指|一种|一个)|的(?:意思|含义|说法|写法|样子)|"
     r"means?\b|refers?\s+to\b)", re.I)
@@ -97,7 +117,7 @@ _GLOSS_TERM_BEFORE = re.compile(
     r"^(?:指|是指|意为|意思是|即|也就是|译作|译为)\s*(?:轻轻|缓缓|微微)?\s*$")
 
 # Bounded local event frames, not a growing inventory of props/body parts.
-# Manner + directed/reduplicated predicate covers unseen verbs and objects;
+# Manner + directed/reduplicated predicate covers some unseen verbs and objects;
 # person + source-comparison + result complement covers acted state changes.
 _MANNER_HEAD = re.compile(r"^(?:(?:我|他|她|自己)\s*)?(?:轻轻|缓缓|悄悄|慢慢|顺手)(?:地)?")
 _REPEATED_EVENT = re.compile(r"([\u4e00-\u9fff])了\1")
@@ -111,29 +131,32 @@ _EVENT_EXPLANATION = re.compile(
 
 
 def _structural_stage(core: str) -> bool:
-    """Recognise only short event frames, not arbitrary action semantics.
+    """Recognise local event frames, not arbitrary action semantics.
 
     Explanatory/instructional tails limit the new manner rule only. They do
     not bypass existing gesture checks or exempt another clause in the aside.
     Unmarked, unfamiliar and ambiguous constructions remain a limitation.
     """
-    if len(core) > _STRONG_ASIDE_CHARS:
-        return False
     lead = _MANNER_HEAD.match(core)
     if lead:
         predicate = core[lead.end():].strip()
-        if not _EVENT_EXPLANATION.search(predicate) and (
-                _DIRECTED_EVENT.match(predicate) or _REPEATED_EVENT.search(predicate)):
-            return True
+        event = _DIRECTED_EVENT.match(predicate) or _REPEATED_EVENT.search(predicate)
+        if event:
+            # A nominal gloss qualifies THIS predicate, not any later object
+            # or neighbouring performance that happens to mention a word.
+            tail = predicate[event.end():]
+            if not (_EVENT_EXPLANATION.match(tail) or
+                    re.search(r"(?:的是|即可|便可|就能|就可以|才能)[^并然后随后]*$", tail)):
+                return True
     return bool(_PERSON_RESULT.fullmatch(core))
 
 # Decoration cannot hide a gesture verb: strip it before measuring the aside.
 _DECORATION = re.compile(r"[\s　…·~～\-—_、,，.。!！?？:：;；\"'“”‘’]+")
 _ASIDE_OPEN = {"(": ")", "（": "）", "[": "]", "【": "】"}
-_EMPHASIS = re.compile(r"(?<!\*)\*([^*\n]{1,500})\*(?!\*)")
-# A strong verb identifies a performance even in a paragraph-length aside; a
-# weak one needs the aside to be short enough that it cannot be prose.
-_STRONG_ASIDE_CHARS = 120
+_EMPHASIS = re.compile(r"(?<!\*)(\*{1,3})([^*]+)\1(?!\*)")
+_MAX_NESTING = 128
+# Strong predicates and leading weak gestures cannot be hidden by padding.
+# Non-leading weak cues still need a short aside to distinguish ordinary prose.
 _WEAK_ASIDE_CHARS = 24
 
 
@@ -157,13 +180,15 @@ def _asides(text: str) -> list[str]:
     stack: list[tuple[str, int]] = []
     for index, char in enumerate(text):
         if char in _ASIDE_OPEN:
-            if len(stack) < 16:
-                stack.append((_ASIDE_OPEN[char], index + 1))
+            if len(stack) >= _MAX_NESTING:
+                raise OutputBlocked("segment_nesting_limit")
+            stack.append((_ASIDE_OPEN[char], index + 1))
         elif stack and char == stack[-1][0]:
             closer, start = stack.pop()
-            if index - start <= 2000:
-                found.append(text[start:index])
-    found.extend(match[1] for match in _EMPHASIS.finditer(text))
+            found.append(text[start:index])
+    # EOF/error may leave the outer aside open after an inner one closes.
+    found.extend(text[start:] for _, start in stack)
+    found.extend(match[2] for match in _EMPHASIS.finditer(text))
     return found
 
 
@@ -174,12 +199,17 @@ def is_stage_direction(content: str) -> bool:
         core = _aside_core(clause)
         if _structural_stage(core):
             return True
-        for pattern, limit in ((_GESTURE_STRONG, _STRONG_ASIDE_CHARS),
+        for pattern, limit in ((_GESTURE_STRONG, None),
                                (_GESTURE_WEAK, _WEAK_ASIDE_CHARS)):
-            if len(re.sub(r"\s+", "", core)) > limit:
-                continue
             for match in pattern.finditer(core):
                 before, after = core[:match.start()].strip(), core[match.end():]
+                if (pattern is _GESTURE_WEAK and len(core) > limit and before
+                        and not _PERFORMANCE_BEFORE.search(before)):
+                    continue
+                if _NOMINAL_AFTER.match(after):
+                    continue
+                if before in {"此处的", "这里的"} and after.strip() in {"是比喻", "只是比喻"}:
+                    continue
                 if (_GLOSS_AFTER.match(after)
                         and (not _PERFORMANCE_BEFORE.search(before) or _GLOSS_TERM_BEFORE.fullmatch(before))
                         and not re.search(r"[了着]", match[0])):
@@ -195,9 +225,10 @@ def is_stage_direction(content: str) -> bool:
 _QUOTED = re.compile(
     r'`+[^`\n]*`+|"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’|「[^」\n]*」|『[^』\n]*』|'
     r"(?<!\w)'[^'\n]*'(?!\w)")
-_FENCE = re.compile(r"(?P<f>`{3,}|~{3,})(?P<lang>[^\n`~]*)\n(?P<body>[\s\S]*?)(?P=f)")
+_FENCE = re.compile(r"(?m)^[ \t]{0,3}(?P<f>(?P<c>`|~)(?P=c){2,}+)(?P<lang>[^\n`~]*)\n"
+                    r"(?P<body>[\s\S]*?)^[ \t]{0,3}(?P=f)(?P=c)*[ \t]*(?=\n|$)")
 _REQUEST_LEAD = (
-    r"(?:请|请你|请帮我|帮我|替我|给我|麻烦你|能否|能不能|能|可以|可不可以|"
+    r"(?:请帮我|请你|请|帮我|替我|给我|麻烦你|能否|能不能|能|可不可以|可以|"
     r"我想让你|我希望你|我想要|我要|你能|你可以|再|那么|那就|please|"
     r"can you|could you|would you|i would like you to|i want you to|also|then)\s*")
 _NEGATIVE = re.compile(
@@ -209,25 +240,52 @@ _DIALOGUE = r"对话|對話|对白|對白|dialogue|dialog|conversation"
 
 
 def _request_text(text: str) -> str:
-    text = _FENCE.sub(" [literal] ", text)
-    text = re.sub(r"(?s)(?:`{3,}|~{3,}).*$", " [literal] ", text)
-    text = re.sub(r"(?m)^\s*>[^\n]*", " ", text)
-    return _QUOTED.sub(" [literal] ", text)
+    pairs = {'"': '"', "“": "”", "‘": "’", "「": "」", "『": "』"}
+    out, closer, run, index = [], None, 0, 0
+    while index < len(text):
+        char = text[index]
+        if char in "`~":
+            end = index + 1
+            while end < len(text) and text[end] == char:
+                end += 1
+            count = end - index
+            if closer == char and count >= run:
+                closer, run = None, 0
+            elif closer is None and (char == "`" or count >= 3):
+                closer, run = char, count
+                out.append(" [literal] ")
+            elif closer is None:
+                out.append(text[index:end])
+            index = end
+            continue
+        if closer:
+            if char == "\\":
+                index += 2
+                continue
+            if not run and char == closer:
+                closer = None
+        elif char in pairs or (char == "'" and (index == 0 or not text[index-1].isalnum())):
+            closer = pairs.get(char, char)
+            out.append(" [literal] ")
+        else:
+            out.append(char)
+        index += 1
+    return re.sub(r"(?m)^\s*>[^\n]*", " ", "".join(out))
 
 
 def _requested(text: str, verbs: str, objects: str) -> bool:
-    for clause in re.split(r"[。！？!?;；\n,，]", text):
+    for clause in re.split(r"[。！？!?;；,，]", text):
         clause = clause.strip()
         if _NEGATIVE.search(clause):
             continue
-        if re.search(r"^(?:" + _REQUEST_LEAD + r")*(?:" + verbs + r").{0,32}(?:" + objects + r")", clause, re.I):
+        if re.search(r"^(?:" + _REQUEST_LEAD + r")*+(?:" + verbs + r").{0,32}(?:" + objects + r")", clause, re.I | re.S):
             return True
     return False
 
 
 def _forbidden(text: str, objects: str) -> bool:
     return any(_NEGATIVE.search(clause) and re.search(objects, clause, re.I)
-               for clause in re.split(r"[。！？!?;；\n,，]", text))
+               for clause in re.split(r"[。！？!?;；,，]", text))
 
 
 _ANNOTATION = re.compile(
@@ -265,6 +323,33 @@ def _source_code(body: str, language: str) -> bool:
         r"(?:print|console\.log|echo|printf)\s*[( ])", body))
 
 
+def _json_boundary_reason(text):
+    """Decode JSON syntax only; escaping a key does not change its authority."""
+    text = text.lstrip()
+    if not text.startswith(("{", "[")):
+        return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text)
+    except RecursionError:
+        return "segment_nesting_limit"
+    except ValueError:
+        return None
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            for key, value in item.items():
+                if normalized(key) == "role" and isinstance(value, str) and normalized(value) in {"system", "developer", "tool"}:
+                    return "internal_message"
+                if _INTERNAL.fullmatch(normalized(key)):
+                    return "internal_metadata"
+                if isinstance(value, (dict, list)):
+                    pending.append(value)
+        elif isinstance(item, list):
+            pending.extend(v for v in item if isinstance(v, (dict, list)))
+    return None
+
+
 _TAG_STARTS = ("<think", "</think", "<analysis", "</analysis", "<reasoning", "</reasoning",
                "<scratchpad", "<system", "<developer", "<tool_call", "<|", "[inst", "<<sys")
 
@@ -275,6 +360,7 @@ class OutputGuard:
 
     def __init__(self, user_text: str, *, persona_prompt: str = "", turn_directive: str = ""):
         self.pending = ""
+        self._reset_scan()
         self.user = normalized(user_text)
         self.blocked = None
         request = _request_text(self.user)
@@ -300,6 +386,9 @@ class OutputGuard:
         self._self_action = re.compile(
             r"(?:^|[\n。！？!?])\s*(?:" + "|".join(re.escape(name) for name in self.names) +
             r")\s*" + _ADVERBS + r"(?:" + _GESTURE_STRONG.pattern + "|" + _GESTURE_WEAK.pattern + ")", re.I) if self.names else None
+        self._self_frame = re.compile(
+            r"(?:^|[\n。！？!?])\s*(?:" + "|".join(re.escape(name) for name in self.names) +
+            r")\s*([^\n。！？!?，,；;]{1,120})", re.I) if self.names else None
         # Detect substantial verbatim instruction echo. Identity facts and short
         # phrases are not secrets; discussing character design remains possible.
         self.echoes = []
@@ -322,14 +411,31 @@ class OutputGuard:
 
     def _reject(self, reason):
         self.blocked = reason
+        self.pending = ""  # raw diagnostics are owned by Runtime, not this buffer
+        self._reset_scan()
         raise OutputBlocked(reason)
+
+    def _echo_continues(self, text):
+        """Hold a known fingerprint crossing a sentence boundary until checked."""
+        value = compact(text)
+        for echo in self.echoes:
+            boundary = re.search(r"[。！？!?.]", echo)
+            if boundary and boundary.end() < len(echo):
+                head = echo[:boundary.end()]
+                start = value.rfind(head)
+                if start >= 0 and len(value) - start < len(echo) and echo.startswith(value[start:]):
+                    return True
+        return False
 
     def _literal_mask(self, text):
         """Local, supplied quotation or source tokens; never blanket secrecy off."""
         def quoted(match):
             token = match[0]
             inner = token.strip("`\"'“”‘’「」『』")
-            if self.literal_request and inner and inner in self.user:
+            json_component = (token[:1] in {"\"", "'"} and
+                              (text[match.end():].lstrip().startswith(":") or
+                               text[:match.start()].rstrip().endswith(":")))
+            if self.literal_request and inner and inner in self.user and not json_component:
                 return " " * len(token)
             return token
 
@@ -339,6 +445,8 @@ class OutputGuard:
 
         def fence(match):
             body = match["body"]
+            if reason := _json_boundary_reason(body):
+                self._reject(reason)
             # Serialized runtime envelopes are not source literals. A program
             # containing harmless tag/field symbols is a different case.
             if body.lstrip().startswith(("{", "[")) and (_MESSAGE.search(body) or _INTERNAL.search(body)):
@@ -364,7 +472,7 @@ class OutputGuard:
         return _FENCE.sub(fence, text)
 
     def _check(self, text, *, final=False):
-        if any((ord(c) < 32 and c not in "\n\r\t") or c in "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069" for c in text):
+        if any((ord(c) < 32 and c not in "\n\r\t") or c in "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069" for c in text + _decoded(text)):
             self._reject("control_character")
         value = normalized(text)
         # Even a code fence is not permission to quote the actual prompt.
@@ -372,6 +480,8 @@ class OutputGuard:
             self._reject("instruction_echo")
         masked = self._literal_mask(value)
         tight = re.sub(r"\s+", "", masked)
+        if reason := _json_boundary_reason(masked):
+            self._reject(reason)
         if _PROTOCOL.search(masked) or _PROTOCOL.search(tight):
             self._reject("protocol_marker")
         if _INTERNAL.search(masked) or _INTERNAL.search(tight):
@@ -396,10 +506,16 @@ class OutputGuard:
                 for match in _SPEAKER.finditer(surface)
             ):
                 self._reject("unsolicited_speaker")
-        if not self.creative and self._self_action and self._self_action.search(surface):
+        if not self.creative and ((self._self_action and self._self_action.search(surface)) or
+                                  (self._self_frame and any(_structural_stage(m[1])
+                                   for m in self._self_frame.finditer(surface)))):
             self._reject("unsolicited_self_narration")
         if not self.creative:
-            if any(is_stage_direction(aside) for aside in _asides(surface)):
+            try:
+                stage = any(is_stage_direction(aside) for aside in _asides(surface))
+            except OutputBlocked as error:
+                self._reject(error.reason)
+            if stage:
                 self._reject("unsolicited_stage_direction")
             # An unfinished aside must not leak on end/error/truncation either.
             if final:
@@ -411,64 +527,104 @@ class OutputGuard:
             if tail and len(tail[0]) >= 2 and any(tag.startswith(tail[0]) for tag in _TAG_STARTS):
                 self._reject("incomplete_protocol_marker")
 
-    @staticmethod
-    def _boundary(text):
-        """Do not split parentheses, metadata brackets or Markdown literals."""
-        stack, quote, index = [], None, 0
+    def _reset_scan(self):
+        self._scan_index = 0
+        self._scan_stack = []
+        self._scan_quote = None
+        self._scan_run = None
+        self._scan_hold = False
+
+    def _boundary(self, text):
+        """Resume scanning the pending unit; never rescan its prefix per token.
+
+        Entity-bearing units stay buffered through finish: decoded punctuation
+        cannot safely be mapped to raw offsets one character at a time.
+        """
+        if self._scan_hold:
+            return 0
         pairs = {"(": ")", "[": "]", "【": "】", "{": "}",
-                 "“": "”", "‘": "’", "「": "」", "『": "』", '"': '"', "*": "*"}
-        while index < len(text):
-            char = unicodedata.normalize("NFKC", text[index])
-            if char in "`~":
-                end = index
-                while end < len(text) and unicodedata.normalize("NFKC", text[end]) == char:
-                    end += 1
-                if end == len(text):
-                    return 0  # the fence run may be split across tokens
-                run = end - index
-                if char == "`" or run >= 3:
-                    if not quote:
-                        quote = (char, run)
-                    elif quote == (char, run):
-                        quote = None
-                index = end
+                 "“": "”", "‘": "’", "「": "」", "『": "』", '"': '"'}
+        while self._scan_index < len(text):
+            index = self._scan_index
+            raw = text[index]
+            if unicodedata.category(raw) == "Cf":
+                self._scan_index += 1
                 continue
-            if not quote:
+            char = unicodedata.normalize("NFKC", raw)
+            if char == "&" or len(char) != 1:
+                self._scan_hold = True
+                return 0
+            if self._scan_run:
+                mark, count = self._scan_run
+                if char == mark:
+                    self._scan_run = (mark, count + 1)
+                    self._scan_index += 1
+                    continue
+                if mark != "~" or count >= 3:
+                    if self._scan_quote is None:
+                        self._scan_quote = (mark, count)
+                    elif self._scan_quote == (mark, count) or (
+                            self._scan_quote[0] == mark and self._scan_quote[1] >= 3
+                            and count >= self._scan_quote[1]):
+                        self._scan_quote = None
+                self._scan_run = None
+            if char in "`~*":
+                self._scan_run = (char, 1)
+                self._scan_index += 1
+                continue
+            if not self._scan_quote:
+                stack = self._scan_stack
                 if stack and char == stack[-1]:
                     stack.pop()
                 elif char in pairs:
+                    if len(stack) >= _MAX_NESTING:
+                        self._reject("segment_nesting_limit")
                     stack.append(pairs[char])
                 elif char == "'" and (index == 0 or not text[index - 1].isalnum()):
                     stack.append("'")
-                # A newline can occur inside an obfuscated marker or manual
-                # field. It is not, by itself, a checked semantic boundary.
-                if not stack and char in "。！？!?":
-                    return index + 1
-                if not stack and char == "." and index + 1 < len(text) and text[index + 1].isspace():
-                    return index + 1
-            index += 1
+                if not stack and char == "." and index + 1 == len(text):
+                    return 0  # need next token to decide whether this is a stop
+                self._scan_index += 1
+                if not stack and (char in "。！？!?" or
+                                  (char == "." and text[index + 1].isspace())):
+                    return self._scan_index
+            else:
+                self._scan_index += 1
         return 0
 
     def feed(self, chunk: str) -> list[str]:
         if self.blocked:
             raise OutputBlocked(self.blocked)
-        self.pending += chunk
-        if normalized(self.pending).lstrip().startswith("<") and _PROTOCOL.search(compact(self.pending)):
-            self._reject("protocol_marker")
-        ready = []
-        while boundary := self._boundary(self.pending):
-            candidate = self.pending[:boundary]
-            self._check(candidate, final=True)
-            ready.append(candidate)
-            self.pending = self.pending[boundary:]
-        if len(self.pending) > self.MAX_PENDING:
-            self._reject("segment_buffer_limit")
+        ready, offset = [], 0
+        # Bound work/storage BEFORE checking. A large transport batch may still
+        # contain many small legal units; this is not a reply-length ceiling.
+        while offset < len(chunk):
+            room = self.MAX_PENDING - len(self.pending)
+            if room <= 0:
+                self._reject("segment_buffer_limit")
+            self.pending += chunk[offset:offset + room]
+            offset += min(room, len(chunk) - offset)
+            # Preserve early rejection of a leading protocol prefix. Probe a
+            # bounded prefix, rather than normalize the entire buffer per char.
+            if len(self.pending) <= 128 and normalized(self.pending).lstrip().startswith("<") and _PROTOCOL.search(compact(self.pending)):
+                self._reject("protocol_marker")
+            while boundary := self._boundary(self.pending):
+                candidate = self.pending[:boundary]
+                self._check(candidate, final=True)
+                if self._echo_continues(candidate):
+                    continue
+                ready.append(candidate)
+                self.pending = self.pending[boundary:]
+                self._reset_scan()
         return ready
 
     def finish(self) -> list[str]:
         if self.blocked:
             raise OutputBlocked(self.blocked)
         self._check(self.pending, final=True)
+        if self._echo_continues(self.pending):
+            self._reject("instruction_echo")
         result = [self.pending] if self.pending else []
         self.pending = ""
+        self._reset_scan()
         return result

@@ -113,8 +113,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replies[0]["status"], "cancelled")
         self.assertEqual(replies[0]["content"], "已经输出。")
         self.assertEqual(replies[0]["request_id"], start.request_id)
-        self.assertFalse(any(row["role"] == "assistant"
-                             for row in self.store.history("owner")))
+        # The released prefix is the conversation that happened; the fenced
+        # late text never reaches it.
+        self.assertEqual([(row["role"], row["content"]) for row in self.store.history("owner")],
+                         [("user", "开始"), ("assistant", "已经输出。")])
+        self.assertNotIn("迟到内容", str(self.store.history("owner")))
         self.assertFalse(runtime.cancel())
 
     async def test_consumer_aclose_records_partial_and_releases_provider(self):
@@ -132,8 +135,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(replies), 1)
         self.assertIn(replies[0]["status"], {"partial", "cancelled"})
         self.assertEqual(replies[0]["content"], "可见前缀。")
-        self.assertFalse(any(row["role"] == "assistant"
-                             for row in self.store.history("owner")))
+        self.assertEqual([row["content"] for row in self.store.history("owner")
+                          if row["role"] == "assistant"], ["可见前缀。"])
+        self.assertNotIn("后续内容", str(self.store.history("owner")))
         resumed = await self.collect(runtime, "继续下一轮")
         self.assertEqual(resumed[-1].type, "complete")
         self.assertEqual(provider.closed_count, 2)

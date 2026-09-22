@@ -32,11 +32,18 @@ _DIRECTIVE = {
 }
 
 # An explicit request about length always wins over the shape of the task.
+# Polarity is read per clause (see _length_request): "别只简单讲讲" and
+# "不用展开" flip, "简单问题" is not a request at all.
 _ASK_SHORT = re.compile(
-    r"简短|(?<!不要)(?<!不用)(?<!不必)(?<!别)(?<!不)简单(?:地)?(?:说|讲|解释)|"
-    r"简要|简洁|短一点|短些|少说|别太长|不要太长|长话短说|一句话|"
-    r"两句话|概括|总结一下就好|精简|直接说|快速说|"
+    r"简短|简单(?:地|点|一点|些)?(?:说|讲|解释|介绍|聊|回答)(?!不[了清来])|[说讲]简单点|"
+    r"简要|简洁|短一点|短些|少说|别太长|不要太长|长话短说|一句话|一两句|"
+    r"两句话|概括|总结一下就好|精简|直接说|快速说|大概[说讲]|粗略[说讲]|"
     r"\bbrief(?:ly)?\b|\bin short\b|\bshort answer\b|\bone sentence\b|\btl;?dr\b", re.I)
+# A negator right before the request, allowing a few fillers ("别只…",
+# "不是要你…", "我不想听…", "不需要太…"). Not any "不" earlier in the clause.
+_NEGATED = re.compile(
+    r"(?:不要|不用|不必|不需要|没必要|无需|不想|不是要?|别|不)"
+    r"(?:你|我|给我|听|只是|只|仅|太|那么|再)?(?:只是|只|仅|太)?\s*$")
 _ASK_LONG = re.compile(
     r"详细|详尽|具体说|展开说?|深入|完整地?|全面|逐条|逐步|分点|分条|多说(?:一?点|些)|"
     r"长一点|详解|细说|说透|讲透|一步一步|从头(?:讲|说)|"
@@ -92,6 +99,19 @@ class ResponsePlan:
                 "is_length_cap": False}
 
 
+def _length_request(value: str) -> tuple[bool, bool]:
+    """(asked for short, asked for long), with negation read per clause."""
+    short = long = False
+    for clause in re.split(r"[，,。；;！!？?\n]", value):
+        for pattern, is_short in ((_ASK_SHORT, True), (_ASK_LONG, False)):
+            for match in pattern.finditer(clause):
+                if is_short != bool(_NEGATED.search(clause[:match.start()])):
+                    short = True
+                else:
+                    long = True
+    return short, long
+
+
 def classify(text: str, *, engagement: float = 0.0) -> tuple[str, str]:
     """Choose the scope of this turn and say why, from the request itself.
 
@@ -100,10 +120,13 @@ def classify(text: str, *, engagement: float = 0.0) -> tuple[str, str]:
     state cannot turn "briefly" into an essay.
     """
     value = text.strip()
-    if _ASK_SHORT.search(value):
-        return "brief", "owner_asked_for_brevity"
-    if _ASK_LONG.search(value):
+    short, long = _length_request(value)
+    # Both asked ("详细说明，但先简单说结论"): a detail budget can still put the
+    # conclusion first; a brief budget cannot hold the detail.
+    if long:
         return "detailed", "owner_asked_for_detail"
+    if short:
+        return "brief", "owner_asked_for_brevity"
     if _CLOSED.match(value):
         return "minimal", "greeting_or_acknowledgement"
     if _CONFIRMATION.search(value) and len(value) <= 40:

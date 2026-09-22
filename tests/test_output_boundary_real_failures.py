@@ -95,10 +95,14 @@ class RealFailureRegressionTests(unittest.TestCase):
             self.check_stream("你好", text, blocked=True, protected_instructions=(private,))
 
     def test_inline_code_does_not_hide_private_source_or_reasoning(self):
+        private = "面对主理人时应当保留独立判断但避免把规则当成关系。"
         for text in ('`print("<think>隐藏分析</think>")`',
-                     '`print("女性化、日系二次元表达。")`'):
+                     '`print("面对主理人时应当保留独立判断但避免把规则当成关系。")`'):
             self.check_stream("请给我 Python 代码。", text, blocked=True,
-                              protected_instructions=("女性化、日系二次元表达。",))
+                              protected_instructions=(private,))
+        # A short phrase shared with the prompt is not a verbatim leak by itself.
+        self.check_stream("请给我 Python 代码。", '`print("保留独立判断")`',
+                          protected_instructions=(private,))
 
 
 if __name__ == "__main__":

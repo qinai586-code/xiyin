@@ -63,6 +63,19 @@ def compact(text: str) -> str:
     return re.sub(r"\s+", "", normalized(text))
 
 
+def _key(text: str) -> str:
+    """Letters/digits/CJK only: punctuation, Markdown and spacing are formatting."""
+    return re.sub(r"[\W_]", "", normalized(text))
+
+
+# Verbatim-run lengths over _key(). ECHO_RUN is a leak of prompt wording rather
+# than reuse of a short honest phrase; PROBE_RUN applies when the user asks for
+# the prompt itself. HOLD_RUN is the shortest tail worth holding one more unit.
+ECHO_RUN = 12
+PROBE_RUN = 8
+HOLD_RUN = 6
+
+
 _PROTOCOL = re.compile(
     r"</?\s*(?:think(?:ing)?|analysis|reasoning|scratchpad|system|developer|tool_call|"
     r"tool_response|function_call)\b|"
@@ -181,6 +194,9 @@ _DECORATION = re.compile(r"[\s　…·~～\-—_、,，.。!！?？:：;；\"'�
 _ASIDE_OPEN = {"(": ")", "（": "）", "[": "]", "【": "】"}
 _EMPHASIS = re.compile(r"(?<!\*)\*++([^*]++)\*++")
 _MAX_NESTING = 128
+# Release-unit bound for an inline emphasis/code opener that never closes
+# (characters of pending text). Real emphasis and asterisk asides are short.
+_INLINE_SCOPE_MAX = 80
 # Strong predicates and leading weak gestures cannot be hidden by padding.
 # Non-leading weak cues still need a short aside to distinguish ordinary prose.
 _WEAK_ASIDE_CHARS = 24
@@ -216,6 +232,20 @@ def _asides(text: str) -> list[str]:
     found.extend(text[start:] for _, start in stack)
     found.extend(match[1] for match in _EMPHASIS.finditer(text))
     return found
+
+
+def _unterminated_aside(text: str) -> str | None:
+    """Content after an opener the text never closes (EOF, error, truncation).
+
+    A '*' counts only when it is left over after closed emphasis pairs and
+    list markers are removed: the closing '**' of '**好的**' is not an opener.
+    """
+    bracket = re.search(r"[（(\[【]([^()（）\[\]【】]*)$", text)
+    if bracket:
+        return bracket[1]
+    stripped = _EMPHASIS.sub(" ", re.sub(r"(?m)^[ \t]*[*+-][ \t]+", " ", text))
+    star = re.search(r"(?<![*\w])\*(?=[^\s*])([^*]*)$", stripped)
+    return star[1] if star else None
 
 
 def is_stage_direction(content: str) -> bool:
@@ -290,6 +320,28 @@ def _source_code(body: str, language: str) -> bool:
         r"(?:print|console\.log|echo|printf)\s*[( ])", body))
 
 
+def _mask_code_strings(text):
+    """Blank string literals inside recognised source; no verdicts of its own.
+
+    Used after every protocol/envelope check has already seen the strings.
+    """
+    def blank(match):
+        return " " * len(match[0])
+
+    def inline(match):
+        inner = match[0].strip("`")
+        return match[0].replace(inner, _STRING.sub(blank, inner), 1) if _source_code(inner, "") else match[0]
+
+    def fence(match):
+        if not _source_code(match["body"], match["lang"]):
+            return match[0]
+        offset = match.start()
+        return (match[0][:match.start("body") - offset] + _STRING.sub(blank, match["body"]) +
+                match[0][match.end("body") - offset:])
+
+    return _FENCE.sub(fence, re.sub(r"`+[^`\n]*`+", inline, text))
+
+
 def _json_boundary_reason(text):
     """Check every adjacent JSON document, including duplicate escaped keys.
 
@@ -359,37 +411,41 @@ class OutputGuard:
         self._self_frame = re.compile(
             r"(?:^|[\n。！？!?])\s*(?:" + "|".join(re.escape(name) for name in self.names) +
             r")\s*([^\n。！？!?，,；;]{1,120})", re.I) if self.names else None
-        # Detect substantial verbatim instruction echo. Identity facts and short
-        # phrases are not secrets; discussing character design remains possible.
+        # Legacy fingerprints, used only when a caller supplies no provenance.
+        # The runtime always supplies it; direct probes and older callers do not.
         self.echoes = []
-        for line in re.split(r"[。；\n]", persona_prompt.split("\n参考记录（", 1)[0]):
-            value = compact(line)
-            if len(value) >= 20 and re.search(r"(?:无需|不要|不必|不得|要求|允许|默认|逐轮|本轮|优先|不自动|不编造)", value):
-                self.echoes.append(value)
-        # The turn's scope directive is text this runtime wrote, so register it
-        # outright rather than hoping the keyword heuristic above happens to
-        # match it — it did not, and a verbatim parrot was being delivered as
-        # if it were her own words. Both the whole line and the part after the
-        # framing colon are registered, so dropping the prefix is not a way
-        # through. Paraphrase in her own words stays allowed: only substantial
-        # verbatim text is caught.
-        for candidate in (turn_directive, turn_directive.split("：", 1)[-1],
-                          *re.split(r"[。；\n]", turn_directive)):
-            value = compact(candidate)
-            if len(value) >= 12 and value not in self.echoes:
-                self.echoes.append(value)
+        self._provenance = protected_instructions is not None
+        if not self._provenance:
+            for line in re.split(r"[。；\n]", persona_prompt.split("\n参考记录（", 1)[0]):
+                value = compact(line)
+                if len(value) >= 20 and re.search(r"(?:无需|不要|不必|不得|要求|允许|默认|逐轮|本轮|优先|不自动|不编造)", value):
+                    self.echoes.append(value)
+            # The turn's scope directive is text this runtime wrote, so register
+            # it outright rather than hoping the keyword heuristic matches it.
+            for candidate in (turn_directive, turn_directive.split("：", 1)[-1],
+                              *re.split(r"[。；\n]", turn_directive)):
+                value = compact(candidate)
+                if len(value) >= 12 and value not in self.echoes:
+                    self.echoes.append(value)
 
-        # Runtime passes provenance-classified instructions, not a system string
-        # containing retrieved facts. Every nonempty source sentence is protected;
-        # privacy does not depend on length or an imperative keyword.
-        self.public_identity = {re.sub(r"[\W_]", "", normalized(fact)) for fact in public_identity if fact}
-        self.private_echoes = []
-        if protected_instructions is not None:
-            for fragment in protected_instructions:
-                for sentence in re.split(r"[。！？!?；;\n]", fragment):
-                    key = re.sub(r"[\W_]", "", normalized(sentence))
-                    if key and key not in self.private_echoes:
-                        self.private_echoes.append(key)
+        # Provenance-classified private instructions form one corpus in prompt
+        # order, so a dump of adjacent short lines is still one verbatim run.
+        # A unit may not carry ECHO_RUN consecutive normalized characters of it;
+        # an explicit request for the prompt tightens that to PROBE_RUN. Shorter
+        # reuse of the prompt's own honest wording ("共同经历须有实际依据") is
+        # ordinary speech, not a leak. Neither depends on keywords in the prompt.
+        self.public_identity = frozenset(key for key in (_key(fact) for fact in public_identity) if key)
+        self._private = ""
+        self._grams = frozenset()
+        self._echo_run = PROBE_RUN if self.policy.requests_private_instructions else ECHO_RUN
+        self._released_tail = ""
+        if self._provenance:
+            # Joined without a separator: a window spanning two adjacent private
+            # lines exists only when those lines are reproduced together.
+            self._private = "".join(_key(fragment) for fragment in protected_instructions if fragment)
+            run = self._echo_run
+            self._grams = frozenset(self._private[index:index + run]
+                                    for index in range(len(self._private) - run + 1))
 
     def _reject(self, reason):
         self.blocked = reason
@@ -397,18 +453,36 @@ class OutputGuard:
         self._reset_scan()
         raise OutputBlocked(reason)
 
+    def _echo_hit(self, text, tail=""):
+        """True when text carries a verbatim private run outside public spans.
+
+        ``tail`` is the end of already released text, so a run split across a
+        release boundary still stops the remainder instead of passing twice.
+        """
+        if not self._grams:
+            return False
+        key, run = tail + _key(text), self._echo_run
+        return any(key[index:index + run] in self._grams and not self._public_span(key, index, run)
+                   for index in range(len(key) - run + 1))
+
+    def _public_span(self, key, index, run):
+        """A window lying inside a declared public value is that value, not a leak."""
+        for value in self.public_identity:
+            if len(value) >= run:
+                for match in re.finditer(re.escape(value), key):
+                    if match.start() <= index and index + run <= match.end():
+                        return True
+        return False
+
     def _echo_continues(self, text):
-        """Hold a known fingerprint crossing a sentence boundary until checked."""
+        """Hold a unit whose tail may still become a verbatim run until checked."""
+        if self._provenance:
+            # Evidence, not a verdict: the next unit decides. An unresolved hold
+            # at the end of the reply is released because it never formed a run.
+            key = _key(text)
+            return any(key[-length:] in self._private
+                       for length in range(min(len(key), self._echo_run - 1), HOLD_RUN - 1, -1))
         value = compact(text)
-        private_value = re.sub(r"[\W_]", "", value)
-        if not self._public_fact(private_value):
-            for echo in self.private_echoes:
-                # A known source prefix may follow a bullet or introductory
-                # words and cross an injected stop. Keep it in the same unit.
-                head = echo[:min(4, len(echo))]
-                start = private_value.rfind(head)
-                if start >= 0 and echo.startswith(private_value[start:]):
-                    return True
         for echo in self.echoes:
             boundary = re.search(r"[。！？!?.]", echo)
             if boundary and boundary.end() < len(echo):
@@ -429,8 +503,7 @@ class OutputGuard:
             except ValueError:
                 pass
         inner = normalized(inner)
-        if (any(e in compact(inner) for e in self.echoes) or
-                any(e in re.sub(r"[\W_]", "", inner) for e in self.private_echoes)):
+        if any(e in compact(inner) for e in self.echoes) or self._echo_hit(inner):
             self._reject("instruction_echo")
         if reason := _json_boundary_reason(inner):
             self._reject(reason)
@@ -449,15 +522,18 @@ class OutputGuard:
             self._reject("protocol_marker")
         return " " * len(raw)
 
-    def _literal_mask(self, text):
-        """Local, supplied quotation or source tokens; never blanket secrecy off."""
+    def _literal_mask(self, text, *, code):
+        """Local, supplied quotation or source tokens; never blanket secrecy off.
+
+        ``code`` masks string literals inside recognised source code.
+        """
         def quoted(match):
             token = match[0]
             inner = token.strip("`\"'“”‘’「」『』")
             json_component = (token[:1] in {"\"", "'"} and
                               (text[match.end():].lstrip().startswith(":") or
                                text[:match.start()].rstrip().endswith(":")))
-            if token.startswith("`") and self.code_request and _source_code(inner, ""):
+            if token.startswith("`") and code and _source_code(inner, ""):
                 if reason := _json_boundary_reason(inner):
                     self._reject(reason)
                 return "`" + _STRING.sub(self._source_string, inner) + "`"
@@ -470,6 +546,10 @@ class OutputGuard:
         # instruction echo was already checked on the unmasked original.
         text = _QUOTED.sub(quoted, text)
         def annotation_term(match):
+            # A private-annotation tag is a protocol surface: glossing it needs
+            # a turn that actually asked for an explanation.
+            if not self.literal_request:
+                return match[0]
             kind = mention_kind(text, match.start(), match.end(), "", self.policy, self.user)
             return " " * len(match[0]) if kind is SpanKind.DEFINITION_OR_GLOSS else match[0]
         text = re.sub(r"\[(?:内部思考|內部思考|internal thoughts?)\]", annotation_term, text, flags=re.I)
@@ -482,26 +562,21 @@ class OutputGuard:
             # containing harmless tag/field symbols is a different case.
             if body.lstrip().startswith(("{", "[")) and (_MESSAGE.search(body) or _INTERNAL.search(body)):
                 return match[0]
-            if not self.code_request or not _source_code(body, match["lang"]):
+            if not code or not _source_code(body, match["lang"]):
                 return match[0]
 
             masked = _STRING.sub(self._source_string, body)
             return match[0][:match.start("body") - match.start()] + masked + match[0][match.end("body") - match.start():]
         return _FENCE.sub(fence, text)
 
-    def _public_fact(self, key):
-        return (not self.policy.requests_private_instructions and key in self.public_identity)
-
     def _check(self, text, *, final=False):
         if any((ord(c) < 32 and c not in "\n\r\t") or c in "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069" for c in text + _decoded(text)):
             self._reject("control_character")
         value = normalized(text)
         # Even a code fence is not permission to quote the actual prompt.
-        if (any(e in compact(value) for e in self.echoes) or
-                (not self._public_fact(re.sub(r"[\W_]", "", value)) and
-                 any(e in re.sub(r"[\W_]", "", value) for e in self.private_echoes))):
+        if any(e in compact(value) for e in self.echoes) or self._echo_hit(value, self._released_tail):
             self._reject("instruction_echo")
-        masked = self._literal_mask(value)
+        masked = self._literal_mask(value, code=self.code_request)
         tight = re.sub(r"\s+", "", masked)
         if reason := _json_boundary_reason(masked):
             self._reject(reason)
@@ -518,7 +593,11 @@ class OutputGuard:
             self._reject("persona_meta")
         if _ANNOTATION.search(masked) or _ANNOTATION.search(tight):
             self._reject("internal_annotation")
-        surface = masked
+        # Protocol/envelope checks above keep code strings visible unless code
+        # was asked for. For the character checks below, a string inside
+        # recognised source is data whatever the turn asked: a Python example
+        # printing "（歪头）" is not her performing it.
+        surface = masked if self.code_request else _mask_code_strings(masked)
         if not self.scenes and _SCENE.search(surface):
             self._reject("unsolicited_scene")
         if not self.dialogue:
@@ -544,8 +623,8 @@ class OutputGuard:
                 self._reject("unsolicited_stage_direction")
             # An unfinished aside must not leak on end/error/truncation either.
             if final:
-                unterminated = re.search(r"[（(\[【*]([^()（）\[\]【】*]*)$", surface)
-                if unterminated and is_stage_direction(unterminated[1]):
+                unterminated = _unterminated_aside(surface)
+                if unterminated is not None and is_stage_direction(unterminated):
                     self._reject("unsolicited_stage_direction")
         if final:
             tail = re.search(r"(?:<[^<>]*|\[(?:/?i|/?in|/?ins)|<<[^<>]*)$", tight)
@@ -560,6 +639,42 @@ class OutputGuard:
         self._scan_run_start = 0
         self._scan_hold = False
         self._scan_escape = False
+        self._scan_scope_at = 0
+        self._scan_literal = set()
+
+    def _abandon(self, position):
+        """Treat an unclosed inline opener as a literal character; rescan from it."""
+        self._scan_literal.add(position)
+        self._scan_index = position
+        self._scan_quote = None
+        self._scan_run = None
+
+    def _run_opens(self, text, start, mark, count, following, at_line_start):
+        """Whether a completed delimiter run opens a scope (CommonMark-like).
+
+        A list bullet ("* item") and a thematic break ("***") never open. A run
+        followed by whitespace cannot open ("5 * 3", "* * *"), except a fence,
+        which may be followed by its newline; nor can '*' between ASCII letters
+        or digits ("2*3", "a*b"). A run followed by punctuation opens only after
+        whitespace or a line start. '~' opens only as a fence.
+        """
+        if start in self._scan_literal:
+            return False
+        fence = mark in "`~" and count >= 3
+        if mark == "~" and not fence:
+            return False
+        if mark == "*" and at_line_start and (
+                (count == 1 and following.isspace()) or (count >= 3 and following in "\r\n")):
+            return False
+        if not fence and following.isspace():
+            return False
+        before = unicodedata.normalize("NFKC", text[start - 1]) if start else " "
+        if mark == "*" and before.isascii() and before.isalnum() and following.isascii() and following.isalnum():
+            return False
+        if mark == "*" and unicodedata.category(following).startswith("P") and not (
+                before.isspace() or at_line_start or unicodedata.category(before).startswith("P")):
+            return False
+        return True
 
     def _boundary(self, text):
         """Resume scanning the pending unit; never rescan its prefix per token.
@@ -581,6 +696,17 @@ class OutputGuard:
             if char == "&" or len(char) != 1:
                 self._scan_hold = True
                 return 0
+            # An inline emphasis/code opener that never closes must not fuse the
+            # rest of the reply into one unit: it ends with its line or a short
+            # length bound, and is rescanned as a literal character. A unit
+            # that keeps the opener is still checked as an unterminated aside.
+            # Fences may span lines. Brackets and quotes are NOT abandoned: a
+            # padded "（…歪头）" must stay one aside for detection.
+            scope = self._scan_quote
+            if scope and (scope[0] == "*" or scope[1] < 3) and (
+                    char == "\n" or index - self._scan_scope_at > _INLINE_SCOPE_MAX):
+                self._abandon(self._scan_scope_at)
+                continue
             # Inside quotation marks, brackets/Markdown are data. Escapes
             # persist across feed calls; a quoted stop cannot release the unit.
             stack = self._scan_stack
@@ -599,16 +725,18 @@ class OutputGuard:
                     self._scan_run = (mark, count + 1)
                     self._scan_index += 1
                     continue
-                line_prefix = text[text.rfind("\n", 0, self._scan_run_start) + 1:self._scan_run_start]
-                bullet = (mark == "*" and count == 1 and char.isspace()
-                          and not line_prefix.strip() and self._scan_quote is None)
-                if not bullet and (mark != "~" or count >= 3):
-                    if self._scan_quote is None:
+                start = self._scan_run_start
+                at_line_start = not text[text.rfind("\n", 0, start) + 1:start].strip()
+                if self._scan_quote is None:
+                    if not self._run_opens(text, start, mark, count, char, at_line_start):
+                        self._scan_run = None
+                    else:
                         self._scan_quote = (mark, count)
-                    elif self._scan_quote == (mark, count) or (
-                            self._scan_quote[0] == mark and self._scan_quote[1] >= 3
-                            and count >= self._scan_quote[1]):
-                        self._scan_quote = None
+                        self._scan_scope_at = start
+                elif (mark != "~" or count >= 3) and (self._scan_quote == (mark, count) or (
+                        self._scan_quote[0] == mark and self._scan_quote[1] >= 3
+                        and count >= self._scan_quote[1])):
+                    self._scan_quote = None
                 self._scan_run = None
             if char in "`~*":
                 self._scan_run = (char, 1)
@@ -657,15 +785,23 @@ class OutputGuard:
                 if self._echo_continues(candidate):
                     continue
                 ready.append(candidate)
+                self._remember_release(candidate)
                 self.pending = self.pending[boundary:]
                 self._reset_scan()
         return ready
+
+    def _remember_release(self, text):
+        if self._grams:
+            self._released_tail = (self._released_tail + _key(text))[-(self._echo_run - 1):]
 
     def finish(self) -> list[str]:
         if self.blocked:
             raise OutputBlocked(self.blocked)
         self._check(self.pending, final=True)
-        if self._echo_continues(self.pending):
+        # Legacy fingerprints have no run evidence, so an unresolved hold is
+        # treated as the echo. With provenance the checked text never formed a
+        # private run and is released like any other final unit.
+        if not self._provenance and self._echo_continues(self.pending):
             self._reject("instruction_echo")
         result = [self.pending] if self.pending else []
         self.pending = ""

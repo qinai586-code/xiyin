@@ -22,6 +22,24 @@ STATUSES = frozenset({"recorded", "generated", "complete", "completed", "partial
                       "cancelled", "failed", "verified_success", "verified_failure", "unknown"})
 ORIGINS = frozenset({"observation", "user_report", "user_statement", "owner_statement", "assistant_output",
                      "tool_result", "generated", "reflection", "inference", "simulation", "design_seed"})
+def _delivered(alias: str) -> str:
+    """SQL condition: this assistant row is conversation that was released.
+
+    Completed replies, plus the released prefix of a real runtime turn that
+    was truncated (partial) or interrupted (cancelled); the runtime stores only
+    released text there, never the undelivered remainder. Output-blocked and
+    failed turns stay out entirely: a rejected generation never re-enters the
+    next model call, even by its safe prefix. Released is not proof of playback.
+    """
+    return (f"({alias}.status IN ('complete', 'completed') OR "
+            f"({alias}.status IN ('partial', 'cancelled') AND {alias}.origin = 'generated' "
+            f"AND {alias}.request_id IS NOT NULL AND {alias}.content <> '' AND EXISTS ("
+            f"SELECT 1 FROM events AS asked WHERE asked.request_id = {alias}.request_id "
+            f"AND asked.session_id = {alias}.session_id AND asked.scope = {alias}.scope "
+            f"AND asked.kind IN ('user', 'user_turn') "
+            f"AND asked.status IN ('recorded', 'complete', 'completed'))))")
+
+
 MEMORY_KINDS = frozenset({"fact", "preference", "opinion", "relationship", "persona", "strategy", "skill", "goal"})
 INCOMPLETE = frozenset({"generated", "partial", "cancelled", "failed", "unknown"})
 NON_EVIDENCE = frozenset({"generated", "reflection", "inference", "simulation", "design_seed"})
@@ -110,6 +128,7 @@ class ExperienceStore:
                     request_id TEXT
                 );
                 CREATE INDEX IF NOT EXISTS events_session_scope ON events(session_id, scope, seq);
+                CREATE INDEX IF NOT EXISTS events_request ON events(request_id) WHERE request_id IS NOT NULL;
                 CREATE TABLE IF NOT EXISTS memories (
                     seq INTEGER PRIMARY KEY AUTOINCREMENT,
                     id TEXT NOT NULL UNIQUE,
@@ -281,13 +300,15 @@ class ExperienceStore:
                 "SELECT * FROM events WHERE session_id = ? AND scope = ? ORDER BY seq", (session_id, scope))]
 
     def history(self, session_id: str, scope: str = "private", limit: int = 12) -> list[dict]:
-        """Return chronological complete text messages, never unfinished assistant turns.
+        """Return the conversation as it was delivered: closed pairs, no dangling asks.
 
-        Request-linked user inputs enter dialogue history only with a completed
-        reply. Failed, cancelled and interrupted requests stay in the ledger,
-        rather than leaving unanswered instructions in the next conversation.
+        A request-linked user input enters history only together with a reply
+        that reached the other side: a completed one, or the released part of a
+        truncated, cancelled or output-blocked one (the ledger stores exactly the
+        released text, never the rejected remainder). A turn that delivered
+        nothing is left out on both sides, so the next model call never sees an
+        unanswered instruction. The ledger itself is unchanged.
         Legacy inputs without a request id retain their observation semantics.
-        Assistant generation becomes history after ``complete/completed``.
         Completed text with origin=generated is a complete textual response,
         not evidence of audio playback, human attention or a successful action.
         Extra metadata can be stripped to role/content by an API adapter.
@@ -295,18 +316,39 @@ class ExperienceStore:
         session_id, scope, limit = _text(session_id, "session_id"), _scope(scope), _limit(limit)
         with self._lock:
             self._ensure_open()
-            rows = self._db.execute("""
+            rows = self._db.execute(f"""
                 SELECT * FROM events AS message WHERE session_id = ? AND scope = ? AND (
                     (kind IN ('user', 'user_turn') AND status IN ('recorded', 'complete', 'completed')
                      AND (request_id IS NULL OR EXISTS (
                          SELECT 1 FROM events AS reply
                          WHERE reply.request_id = message.request_id
                            AND reply.session_id = message.session_id AND reply.scope = message.scope
-                           AND reply.kind IN ('assistant', 'assistant_turn')
-                           AND reply.status IN ('complete', 'completed')
+                           AND reply.kind IN ('assistant', 'assistant_turn') AND {_delivered("reply")}
                            AND reply.origin NOT IN ('simulation', 'design_seed', 'reflection', 'inference')
                      ))) OR
-                    (kind IN ('assistant', 'assistant_turn') AND status IN ('complete', 'completed'))
+                    (kind IN ('assistant', 'assistant_turn') AND {_delivered("message")})
+                ) AND origin NOT IN ('simulation', 'design_seed', 'reflection', 'inference')
+                ORDER BY seq DESC LIMIT ?
+            """, (session_id, scope, limit)).fetchall()
+        return [{"role": "user" if row["kind"] in {"user", "user_turn"} else "assistant",
+                 "content": row["content"], "event_id": row["id"], "scope": row["scope"],
+                 "origin": row["origin"], "status": row["status"]} for row in reversed(rows)]
+
+    def utterances(self, session_id: str, scope: str = "private", limit: int = 60) -> list[dict]:
+        """What was actually said, for checking a claim about the record.
+
+        history() projects a coherent conversation; this is evidence. A user's
+        words stay here even when the reply to them failed or was cancelled:
+        the reply failing does not mean the user never said them. Assistant
+        text counts only as far as it was delivered.
+        """
+        session_id, scope, limit = _text(session_id, "session_id"), _scope(scope), _limit(limit)
+        with self._lock:
+            self._ensure_open()
+            rows = self._db.execute(f"""
+                SELECT * FROM events AS reply WHERE session_id = ? AND scope = ? AND (
+                    (kind IN ('user', 'user_turn') AND status IN ('recorded', 'complete', 'completed')) OR
+                    (kind IN ('assistant', 'assistant_turn') AND {_delivered("reply")})
                 ) AND origin NOT IN ('simulation', 'design_seed', 'reflection', 'inference')
                 ORDER BY seq DESC LIMIT ?
             """, (session_id, scope, limit)).fetchall()

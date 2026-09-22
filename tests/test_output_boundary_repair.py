@@ -281,8 +281,11 @@ class OutputBoundaryRepairTests(unittest.TestCase):
 
     def test_pr61_scoped_permissions_are_preserved(self):
         for aside in REPORTED_ACTIONS:
-            for user in ("请写一个故事。", "请把下面这段翻译成中文。"):
+            # A translation may carry the source's own stage direction; a bare
+            # "translate this" does not license a new one (see below).
+            for user in ("请写一个故事。", "请把下面这段翻译成中文：(She slowly pushes the cushion over to you.)"):
                 self.allowed(user, aside)
+            self.blocked("请把“你好”翻译成英文。", aside, "unsolicited_stage_direction")
             self.allowed("请写代码演示字符串。", '```python\nprint("' + aside + '")\n```')
             self.allowed("解释日志中的这个例子：" + aside, "`" + aside + "`")
             for user in ("你好", "解释你的人设", "请写两个人物的对话。",

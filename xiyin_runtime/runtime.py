@@ -419,8 +419,13 @@ class XIYINRuntime(RuntimeServices):
         self._authorize()
         if not statement.strip() or len(statement) > 2000:
             raise ValueError("Memory statement must contain 1–2000 characters")
+        # A remember command is an owner request with its own receipt, not a chat
+        # turn awaiting a reply. Linking it to a request keeps it out of the
+        # conversation projection; it stays evidence and reaches later turns as
+        # a saved memory and an operation receipt.
         evidence = self.store.append_event("user", statement, session_id=session_id, scope=scope,
-                                           origin="user_report", status="completed")
+                                           origin="user_report", status="completed",
+                                           request_id="remember_" + uuid.uuid4().hex)
         operation = {"operation": "replace" if supersedes else "remember", "source_event_id": evidence,
                      "statement": statement, "supersedes": supersedes}
         try:

@@ -27,8 +27,42 @@ class TurnContinuityTests(unittest.TestCase):
             request = f"unfinished-{index}"
             self.event("user", f"question-{index}", request_id=request)
             self.event("assistant", f"answer-{index}", request_id=request, status=status)
-        self.assertEqual(self.store.history("owner"), [])
+        # Only truncated/interrupted turns that released text form closed pairs;
+        # blocked/failed and never-terminated generations leave no dangling ask.
+        self.assertEqual([(item["role"], item["content"]) for item in self.store.history("owner")],
+                         [("user", "question-1"), ("assistant", "answer-1"),
+                          ("user", "question-2"), ("assistant", "answer-2")])
         self.assertEqual(len(self.store.list_events("owner")), 10)
+
+    def test_interrupted_turn_with_nothing_released_is_left_out_on_both_sides(self):
+        for status in ("cancelled", "partial"):
+            self.event("user", f"asked-{status}", request_id=f"empty-{status}")
+            self.event("assistant", "", request_id=f"empty-{status}", status=status)
+        self.assertEqual(self.store.history("owner"), [])
+
+    def test_released_text_needs_a_real_request_pair_and_generated_origin(self):
+        # Defense in depth: an orphan or foreign-origin partial row never surfaces.
+        self.event("assistant", "orphan partial", request_id="orphan", status="partial")
+        self.event("user", "asked", request_id="foreign")
+        self.event("assistant", "foreign partial", request_id="foreign", status="cancelled",
+                   origin="assistant_output")
+        self.assertEqual(self.store.history("owner"), [])
+
+    def test_premise_evidence_keeps_user_words_from_failed_turns(self):
+        self.event("user", "我的猫叫团子，是一只三花猫", request_id="blocked")
+        self.event("assistant", "", request_id="blocked", status="failed")
+        self.assertEqual(self.store.history("owner"), [])
+        self.assertEqual([item["content"] for item in self.store.utterances("owner")],
+                         ["我的猫叫团子，是一只三花猫"])
+        from xiyin_runtime.grounding import premise_records
+        record = premise_records(self.store, "我们之前聊过“我的猫叫团子，是一只三花猫”，对吧？",
+                                 session_id="owner", scope="private")[0]
+        self.assertEqual(record["结果"], "记录中有相符的内容")
+
+    def test_history_request_filter_is_indexed(self):
+        plan = " ".join(str(tuple(row)) for row in self.store._db.execute(
+            "EXPLAIN QUERY PLAN SELECT 1 FROM events WHERE request_id = 'x'"))
+        self.assertIn("events_request", plan)
 
     def test_no_terminal_event_is_not_a_completed_turn(self):
         self.event("user", "interrupted before terminal event", request_id="interrupted")

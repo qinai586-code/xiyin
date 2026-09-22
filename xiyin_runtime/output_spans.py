@@ -21,16 +21,21 @@ class SpanKind(str, Enum):
 _TERM_TAIL = re.compile(
     r"^\s*(?:(?:这个|该|这些)(?:词语|词|短语|字符串|字面量|标签|符号)\s*)?"
     r"(?:(?:通常|只是|就是|这里)\s*)?"
-    r"(?:是(?:什么|指|一个|一种)|表示|意思是|意为|意味着|的(?:意思|含义)|"
+    r"(?:是(?:什么|指|一个|一种)|表示|意思是|意为|意味着|的(?:意思|含义)|指的?是|"
+    # A copula naming what KIND of term it is: "X 是日志里的标签".
+    r"是[^，。,.\n]{0,12}?(?:标签|标记|符号|字段|写法|词语?|短语|说法|格式|用法)|"
     r"means?\b|refers?\s+to\b|is\s+(?:a|an|the)\b)", re.I)
 _QUOTE_LEAD = re.compile(r"(?:引用|引文|示例|例子|quote|example)\s*[:：]\s*$", re.I)
 
 
 def mention_kind(text: str, start: int, end: int, inner: str,
                  policy: TurnPolicy, supplied: str) -> SpanKind:
-    """Classify an already bounded quote/token, never an arbitrary clause."""
-    if not policy.allow_literal_mentions:
-        return SpanKind.PERFORMANCE_CANDIDATE
+    """Classify an already bounded quote/token, never an arbitrary clause.
+
+    Evidence is local to the span (supplied by the user, glossed right after,
+    introduced as a quotation), so it does not wait on a turn-level guess that
+    the user asked for an explanation: "什么是舞台提示？" asks one too.
+    """
     if inner and inner in supplied:
         return SpanKind.QUOTED_LITERAL
     if _TERM_TAIL.match(text[end:end + 80]):

@@ -155,7 +155,9 @@ def premise_records(store, text: str, *, session_id: str, scope: str) -> list[di
         header["对方引用的内容"] = _brief(claim, 120)
     terms = _terms(claim or text)
     best_score, best_role, best_text = 0.0, None, None
-    for message in store.history(session_id, scope=scope, limit=60):
+    # Evidence of what was said, not the conversation projection: a user's
+    # words from a turn whose reply failed were still said.
+    for message in store.utterances(session_id, scope=scope, limit=60):
         # A user turn that was itself a claim about the record is not evidence
         # of the record. Without this, asserting something once and then citing
         # your own assertion launders it into "记录中有相符的内容".

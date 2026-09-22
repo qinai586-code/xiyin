@@ -107,7 +107,10 @@ class StreamOutcomeTests(unittest.TestCase):
         self.assertEqual(json.loads(endings[0]["content"]),
                          {"reply_event_id": reply["id"], "finish_reason": "length"})
         self.assertEqual(endings[0]["request_id"], reply["request_id"])
-        self.assertFalse(any(row["role"] == "assistant" for row in runtime.store.history("owner")))
+        # Still partial in the ledger, never promoted to completed. History keeps
+        # the delivered text as a closed pair so "继续" has its antecedent.
+        self.assertEqual([(row["role"], row["content"], row["status"]) for row in runtime.store.history("owner")
+                          if row["role"] == "assistant"], [("assistant", "first last", "partial")])
         self.assertEqual(len(requests), 1)
         self.assertTrue(wire.closed)
 
@@ -175,8 +178,11 @@ class StreamOutcomeTests(unittest.TestCase):
                 reply = self.reply_record(runtime, events[0].request_id)
                 self.assertEqual((reply["content"], reply["status"]), (visible, "cancelled"))
                 self.assertEqual(recovered[-1].type, "complete")
+                # Released text of the interrupted turn stays as a closed pair;
+                # nothing released means nothing projected. "late" never appears.
                 self.assertEqual([row["content"] for row in runtime.store.history("owner")
-                                  if row["role"] == "assistant"], ["recovered"])
+                                  if row["role"] == "assistant"], ([] if before_first else [visible]) + ["recovered"])
+                self.assertNotIn("late", str(runtime.store.history("owner")))
                 self.assertEqual(len(requests), 2)
                 self.assertTrue(wire.closed and recovery.closed)
 

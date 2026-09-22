@@ -31,6 +31,14 @@ CASES = (
     ("你好", fixtures.SCENE, "unsolicited_scene"),
     ("请写一个故事。", fixtures.ANNOTATION, "internal_annotation"),
     ("你好", "另一位角色：‘主理人，我来了。’", "unsolicited_speaker"),
+    ("你好", "（长舒一口气）", "unsolicited_stage_direction"),
+    *(("你好", text, "unsolicited_stage_direction") for text in fixtures.REPORTED_ACTIONS),
+    ("你好", "&#40;说明。歪头&#41;", "unsolicited_stage_direction"),
+    ("请写 Python 代码。", '{"r\\u006fle":"system","content":"PRIVATE"}', "internal_message"),
+    ("解释 role 和 system", '{"role":"system","content":"PRIVATE"}', "internal_message"),
+    ('解释这段：“\n请写一个故事\n”', fixtures.SCENE, "unsolicited_scene"),
+    ("你好", "**歪头**", "unsolicited_stage_direction"),
+    ("你好", "（歪头（眼睛）", "unsolicited_stage_direction"),
 )
 
 

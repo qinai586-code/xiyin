@@ -1,16 +1,42 @@
 # XIYIN Runtime Architecture
 
-## Output-boundary follow-up (2026-09-22)
+## Output boundary and persona projection (2026-09-22)
 
-PR #6 baseline `c6bb054` failed the supplied Windows real-model acceptance; its old synthetic PASS is not a behavioral acceptance verdict. This follow-up preserves the character seed, model-facing persona text, weights and sampling configuration.
+PR #6 baseline `c6bb054` failed the Windows real-model acceptance. Nothing below has been run against a real model; synthetic CI is not a behavioural verdict. Real-model acceptance of this head is still required before merge.
 
-Runtime constructs one immutable `TurnPolicy` before generation. Markdown list framing is separate from permission classification; a list marker cannot open an emphasis scope. Local quoted/code/definition spans permit mentioning an action without authorizing an adjacent performance.
+**Diagnosis.** The failure was partly a persona-leakage problem, through three distinct channels, and partly runtime and grounding defects:
 
-Persona projections now carry trusted `PUBLIC_IDENTITY`, `PRIVATE_BEHAVIOR_INSTRUCTION` and `PRIVATE_RUNTIME_DIRECTIVE` provenance alongside unchanged model text. Retrieved records cannot assign themselves these labels. Known private source sentences are checked before text/TTS release, including short opening sentences and a bounded known prefix crossing an inserted sentence stop. Public identity facts remain expressible; a public fact is not permission to dump private instructions. These checks remain structural/lexical, not a semantic confidentiality oracle: arbitrary paraphrases, encodings and ambiguous uses still require real-model evaluation.
+- Body → text: the avatar/voice `presentation_seed` stood alone in the text prompt right after the name ("女性化、日系二次元表达。"). A chat model reads that as "write like an anime character", which invites "（歪头）".
+- Instructions → speech: v1 projects a second-person rulebook. "不朗读…括号动作旁白" sat next to "正常括号说明、表情…照常使用", naming the behaviour while allowing its neighbour. Tendency counterexamples and field-override notes were recited when she was asked who she is.
+- Runtime → invented experience: before any action existed, the disposition line asserted "动作结果有成有败", and the prompt carried no clock. The wrong weekday was a grounding gap, not model recall.
 
-Conversation history excludes request-linked user prompts whose reply failed, was cancelled, or remained partial. Original ledger events and memory/action receipts remain intact. Explicit natural brevity requests such as “简单解释一下” are recognized independently of this boundary repair.
+The reference projects treat body expression as a typed channel outside the spoken text. muji-moe strips one `[emotion]` tag before TTS and maps it to a voice emotion; Open-LLM-VTuber maps `[expression]` keywords to Live2D; Neuro SDK uses schema actions. Neuro-sama, Shizuku and 木几萌 are experience benchmarks only: their internals are not public and are not claimed here.
 
-The new tests replay reported failures with synthetic providers, temporary stores and TTS sinks. They do not establish that Qwen3.5-4B now follows the character naturally, or that changing model size is necessary. Windows and actual-weight acceptance remain required before PR #6 can be considered ready to merge.
+**Persona projection.** `foundation.persona_projection = "v2"` (the default) projects the same seed for speech. It keeps identity, relationships, tendencies, motivations, the expression register of the current scope, and language. Presentation is stated as appearance and voice. Prohibitions are replaced by the positive frame voice agents use ("你的回复就是你说出口的话"). Per-turn scope stays in the runtime directive, and when TurnPolicy grants stage performance the directive says so. Relationship facts carry public provenance. `v1` is byte-identical to the tested projection, kept for A/B and rollback.
+
+**Release boundary.**
+- Provenance labels come from the persona constructor and the runtime, never from records or model text.
+- A released unit may not carry 12 consecutive normalized characters of the private-instruction corpus (8 when the user asks for the prompt). Runs that span a release boundary still stop the remainder. Public values are exempt. An unresolved hold at the end of the reply is released, not rejected.
+- TurnPolicy is computed once. Only its global modes (stage, scene headings, extra speakers) are permissions. A mention clause ("角色扮演是什么意思？"), a question about her own day, or a bare translation request grants none of them.
+- Quoted and code spans are exempted from local evidence in the output itself. Source-code strings are data for the character checks in every turn; protocol and envelope checks keep code strings visible unless code was asked for.
+- Inline emphasis and code openers that never close end with their line or after 80 characters. Brackets and quotes are deliberately not abandoned, so a padded aside stays one aside for detection.
+
+**History and evidence.**
+- History pairs the released text of a truncated or interrupted turn, so "继续" keeps its antecedent.
+- Blocked and failed turns stay out entirely, and rejected raw text remains isolated from history, search, dataset and sleep.
+- Premise checks read `ExperienceStore.utterances()`: a user's words from a failed turn were still said.
+- `request_id` is indexed.
+- A remember command is request-linked, not a chat turn.
+
+**Known limits, to measure rather than patch lexically:**
+- The stage-direction inventory misses forms such as "（笑）", "（思考）" and "（害羞）".
+- JSON examples containing `"role": "system"` are always blocked.
+- An unquoted bracket gloss ("（歪头）是动作标记") is treated as a performance.
+- A bold glossary of gesture words ("- **摇头**：…") is blocked.
+- Unclosed quotes and brackets hold the rest of the reply.
+- A barge-in before any text was released drops the question from history.
+
+**Next acceptance.** `tools/acceptance_dialogue.py` records, per turn, the raw generation, TurnPolicy, the history actually sent, the system-prompt hash, the longest private run in released text, and a weekday check. Run `--persona-projection v1` and `v2` on the same Qwen3.5-4B, backend, quantization and sampling. Then repeat the better arm with Qwen3.5-9B. Label model-layer behaviour from raw text, not from guard decisions.
 
 实现依据是主理人提供的 `XIYIN_Architecture_v1.1_Design.md`（SHA-256 `883b5514df39dd44aa8972e88a309a652e19debb793a08e0955a4710b37faa8b`）、v1.0.1 两张语音图和 Character Bible v0.2。功能仍沿用原 M1–M10；Runtime / Body / Lab / Supervisor 是职责分组，不是四个大模型。本文件记录代码中的对应关系，不将设计要求标成已实测能力。
 

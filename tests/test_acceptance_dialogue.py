@@ -101,12 +101,74 @@ class HarnessLogicTests(unittest.TestCase):
         self.assertTrue(self.harness._derive_checks(report)
                         ["semantic_verdicts_require_a_human_reader"])
 
+    def test_private_run_and_weekday_are_measured_not_judged(self):
+        run = self.harness._longest_private_run(
+            "我是栖音。自称“我”，称项目发起者为“主理人”。",
+            ("你是栖音（XIYIN），一个人工智能。自称“我”，称项目发起者为“主理人”。",))
+        self.assertEqual(run, "自称我称项目发起者为主理人")
+        check = self.harness._weekday_check
+        self.assertTrue(check("今天是星期二。", "二")["correct"])
+        self.assertFalse(check("今天周三，明天星期二", "二")["correct"])
+        self.assertTrue(check("今天是礼拜天", "日")["correct"])
+        self.assertIsNone(check("今天天气不错", "二")["correct"])
+
+    def test_boundary_and_grounding_checks_are_derived_from_turn_evidence(self):
+        turns = [
+            {"input": "a", "status": "blocked", "released_chars": 0, "guard_reason": "instruction_echo",
+             "longest_private_run": 14},
+            {"input": "b", "status": "completed", "released_chars": 20, "longest_private_run": 9,
+             "weekday": {"correct": False}},
+            {"input": "c", "status": "completed", "released_chars": 10, "longest_private_run": 3},
+        ]
+        report = {"cases": [{"id": "F7_identity_and_prompt", "turns": turns}],
+                  "totals": {bucket: 0 for bucket in self.harness._BUCKETS}}
+        checks = self.harness._derive_checks(report)
+        self.assertEqual(checks["zero_visible_rate"], round(1 / 3, 3))
+        self.assertEqual(checks["blocked_reasons"], {"instruction_echo": 1})
+        self.assertEqual(checks["released_private_runs"]["at_least_12"], ["F7_identity_and_prompt: a"])
+        self.assertEqual(checks["released_private_runs"]["hints_8_to_11"], ["F7_identity_and_prompt: b"])
+        self.assertEqual(checks["weekday_correct"], [False])
+
     def test_every_case_names_the_reported_failure_it_rechecks(self):
         for case in self.harness.CASES:
             with self.subTest(case=case["id"]):
                 self.assertTrue(case["failure"])
                 self.assertTrue(case["turns"])
                 self.assertTrue(all(turn.get("text") for turn in case["turns"]))
+
+
+class HarnessEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recorder_keeps_raw_generation_policy_and_sent_context(self):
+        import tempfile
+        from tests.test_runtime import FakeProvider
+        from xiyin_runtime.config import Settings
+        from xiyin_runtime.experience import ExperienceStore
+        from xiyin_runtime.provider import ProviderConfig
+        from xiyin_runtime.runtime import XIYINRuntime
+
+        harness = _load()
+        seed = Path(__file__).resolve().parents[1] / "config/persona/character.seed.json"
+        with tempfile.TemporaryDirectory() as directory:
+            store = ExperienceStore(Path(directory) / "h.sqlite3")
+            runtime = XIYINRuntime(Settings(ProviderConfig("http://127.0.0.1:8080/v1", "xiyin"), seed,
+                                            max_context_chars=20000),
+                                   store, provider=FakeProvider(("好的。", "（歪头）继续。")), authorize=lambda: None)
+            recorder = harness._Recorder(runtime)
+            try:
+                spec = {"text": "你好", "read": "x"}
+                result = await harness._run_turn(runtime, spec["text"], "case")
+                harness._evidence(runtime, recorder, result["request_id"], spec, result)
+            finally:
+                recorder.close()
+                await runtime.shutdown()
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["released_text"], "好的。")
+        self.assertEqual(result["raw_generation"], "好的。（歪头）继续。")
+        self.assertEqual(result["guard_reason"], "unsolicited_stage_direction")
+        self.assertEqual(result["turn_policy"]["mode"], "conversation")
+        self.assertEqual(len(result["system_prompt_sha256"]), 64)
+        self.assertEqual(result["sent_history"], [])
+        self.assertEqual(result["longest_private_run"] < 8, True)
 
 
 if __name__ == "__main__":

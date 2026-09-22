@@ -147,7 +147,8 @@ class PersonalityInOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(growth["statement"], prompt)
         self.assertNotIn("在情境里安顿下来", prompt)
         self.assertIn("你是栖音", prompt)
-        self.assertIn("与祈奈的关系", prompt)
+        # The seed's relationship agreement, in whichever projection is active.
+        self.assertIn("身份和记忆独立、同等重要的姐妹", prompt)
         self.assertIn("亲近不增加权限", prompt)
 
     async def test_a_passing_mood_never_becomes_a_stored_trait(self):

@@ -6,6 +6,7 @@ is owner-bound by the host entry; external adapters receive public text access.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import json
 from pathlib import Path
 import time
@@ -52,6 +53,8 @@ class RuntimeServices:
         self._stopped = False
         self._dispatch_lock = asyncio.Lock()
         self._last_input = time.monotonic()
+        # The machine clock is the trusted source of "now"; tests may replace it.
+        self.clock = lambda: datetime.now().astimezone()
 
     def _ensure_running(self):
         if self._stopped or (self.supervisor and self.supervisor.stop_requested()):
@@ -74,6 +77,18 @@ class RuntimeServices:
         self.speech = controller
         self.voice = RuntimeVoiceSession(self, controller)
         return self.voice
+
+    def grounding_facts(self, session_id, scope):
+        """Trusted facts she may state as they are: public data, not instructions.
+
+        The model has no clock. Without this line a date or weekday in a reply
+        is a guess (the reported wrong weekday was a grounding gap, not recall).
+        """
+        now = self.clock()
+        offset = now.strftime("%z")
+        zone = f"UTC{offset[:3]}:{offset[3:]}" if offset else "本机时区"
+        weekday = "一二三四五六日"[now.weekday()]
+        return (f"当前本机时间：{now.year}年{now.month}月{now.day}日，星期{weekday}，{now:%H:%M}（{zone}）。",)
 
     def conversation_facts(self, session_id, scope):
         available = [item for item in self.body.capabilities() if item["available"]]

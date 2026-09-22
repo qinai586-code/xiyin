@@ -16,6 +16,9 @@ class Settings:
     max_context_chars: int = 4500
     history_messages: int = 8
     idle_sleep_seconds: int = 300
+    # v2 is the speaking-model projection; v1 is kept byte-identical to the
+    # projection the Windows acceptance run tested, for A/B and rollback.
+    persona_projection: str = "v2"
 
 
 def load_settings() -> Settings:
@@ -37,6 +40,9 @@ def load_settings() -> Settings:
     idle_sleep = config.get("autonomy", {}).get("idle_sleep_seconds", 300)
     if type(idle_sleep) is not int or not 0 <= idle_sleep <= 86400:
         raise ValueError("autonomy.idle_sleep_seconds must be 0..86400")
+    projection = foundation.get("persona_projection", "v2")
+    if projection not in {"v1", "v2"}:
+        raise ValueError("foundation.persona_projection must be v1 or v2")
     return Settings(
         provider=ProviderConfig(
             endpoint=inference["endpoint"],
@@ -51,5 +57,6 @@ def load_settings() -> Settings:
         ),
         persona_path=xiyin_paths.resolve_path("character_seed"),
         idle_sleep_seconds=idle_sleep,
+        persona_projection=projection,
         **values,
     )

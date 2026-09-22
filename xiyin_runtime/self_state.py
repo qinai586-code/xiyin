@@ -122,7 +122,15 @@ class SelfState:
             valence, arousal, control = 0.0, 0.0, 0.5
         tone = "轻快一些" if valence > 0.25 else ("低一些" if valence < -0.25 else "平稳")
         energy = "投入" if arousal > 0.5 else ("安静" if arousal < 0.15 else "一般")
-        if control > 0.65:
+        # Only a recorded executor outcome is evidence of acting. Without one,
+        # the starting control value used to project "动作结果有成有败": a
+        # runtime-authored claim of mixed action results that never happened,
+        # which the model then elaborated into invented activity. States written
+        # before the counter existed still count a moved control value.
+        acted = bool(state.get("action_results")) or control != 0.5
+        if not acted:
+            footing, caution = "这段会话还没有执行过动作", False
+        elif control > 0.65:
             footing, caution = "最近的动作大多验证成功", False
         elif control < 0.4:
             footing, caution = "最近有动作没有成功，先确认现状再动手", True
@@ -130,7 +138,8 @@ class SelfState:
             footing, caution = "动作结果有成有败", False
         attention = state.get("attention")
         focus = "当前这句话" if attention == "current_input" else (attention or "没有特别集中的事")
-        line = (f"当前功能状态：注意力在{focus}，语气{tone}，状态{energy}，{footing}。"
+        line = (f"当前功能状态：注意力在{focus}，语气{tone}，状态{energy}"
+                + (f"，{footing}。" if acted else "。") +
                 "这是运行中的计算状态，可以影响语气和先做什么；它不是主观体验，"
                 "也不需要逐项汇报，更不会自动变成长期性格。")
         return {"activity": state.get("activity", "idle"), "attention": attention,
@@ -190,6 +199,7 @@ class SelfState:
                 direction = {"verified_success": 1, "verified_failure": -1, "unknown": 0, "cancelled": 0}[payload["status"]]
                 affect["control"] = _bounded(affect["control"] + direction * 0.1, 0)
                 affect["valence"] = _bounded(affect["valence"] + direction * 0.05)
+                value["action_results"] = int(value.get("action_results", 0)) + 1
             elif kind == "activity":
                 value.update(activity=payload["name"], attention=payload.get("attention"))
             elif kind == "rest":

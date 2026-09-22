@@ -24,6 +24,10 @@ max_input_chars = 2000
 # Character budget is a guard, not an exact model-token count.
 max_context_chars = 4500
 history_messages = 8
+# How the character seed is projected for the speaking model. "v2" keeps body
+# presentation out of the text rulebook; "v1" is the projection the Windows
+# acceptance run tested, kept byte-identical for A/B comparison and rollback.
+persona_projection = "v2"
 
 [autonomy]
 # Foreground input preempts bounded jobs. No model-driven activity is auto-enabled.

@@ -76,12 +76,13 @@ class PromptProvenanceRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.temp.cleanup)
         self.count = 0
 
-    def runtime(self, chunks):
+    def runtime(self, chunks, projection="v1"):
         self.count += 1
         provider = FakeProvider(chunks)
         store = ExperienceStore(Path(self.temp.name) / f"turn-{self.count}.sqlite3")
+        # The reported leak was of v1 prompt lines; v2 has its own cases below.
         settings = Settings(ProviderConfig("http://127.0.0.1:8080/v1", "xiyin"),
-                            SEED, max_context_chars=20000)
+                            SEED, max_context_chars=20000, persona_projection=projection)
         runtime = XIYINRuntime(settings, store, provider=provider, authorize=lambda: None)
         self.addAsyncCleanup(runtime.shutdown)
         return runtime, provider

@@ -42,17 +42,11 @@ class Persona:
         return "\n".join(self._identity_lines())
 
     def system_prompt(self, growth: list[dict] | None = None) -> str:
-        """Return the unchanged model-facing projection."""
+        """Return the unchanged v1 model-facing projection."""
         return self.system_projection(growth).text
 
-    def system_projection(self, growth: list[dict] | None = None) -> PromptProjection:
-        """Build a prompt from scoped, current memories supplied by the caller.
-
-        Subjects ``tendency:<id>`` and ``expression:<key>`` replace that seed
-        field. Other learned entries remain supplementary, evidence-labelled
-        character context. This is projection only: no seed or memory is saved.
-        """
-        seed = self.data
+    @staticmethod
+    def _current_growth(growth):
         current = [entry for entry in (growth or [])
                    if isinstance(entry, dict)
                    and entry.get("active", True)
@@ -63,6 +57,24 @@ class Persona:
         overrides = {entry.get("subject"): entry["statement"].strip()
                      for entry in current
                      if entry.get("kind") in {"persona", "preference", "opinion"}}
+        return current, overrides
+
+    def system_projection(self, growth: list[dict] | None = None, *, version: str = "v1",
+                          scope: str = "private") -> PromptProjection:
+        """Build a prompt from scoped, current memories supplied by the caller.
+
+        Subjects ``tendency:<id>`` and ``expression:<key>`` replace that seed
+        field. Other learned entries remain supplementary, evidence-labelled
+        character context. This is projection only: no seed or memory is saved.
+        ``v1`` is byte-identical to the projection the Windows run tested;
+        ``v2`` is the speaking-model projection described on _projection_v2.
+        """
+        if version == "v2":
+            return self._projection_v2(growth, scope)
+        if version != "v1":
+            raise ValueError("persona projection must be v1 or v2")
+        seed = self.data
+        current, overrides = self._current_growth(growth)
         lines = self._identity_lines()
         # These field values are public identity metadata, not new prompt
         # wording. The existing engineering projection ("你是…，以…自称")
@@ -107,6 +119,76 @@ class Persona:
             "平常直接交流，不朗读人设守则、内部标签或括号动作旁白；明确要求创作时可写动作。正常括号说明、表情、感受、愿望、玩笑和明确想象照常使用，没有固定口头禅或篇幅。",
         ]:
             add_instruction(line)
+        return PromptProjection("\n".join(lines), tuple(fragments))
+
+    def _projection_v2(self, growth, scope):
+        """The speaking model's slice of the same seed; the seed is unchanged.
+
+        v1 handed a small model a second-person rulebook, and each part leaked
+        in its own way. The presentation seed (a body/avatar/voice attribute,
+        Architecture v1.1 §15.2) sat in the text prompt right after the name,
+        which reads as "write like an anime character" and invites "（歪头）".
+        "不朗读…括号动作旁白" next to "正常括号说明、表情…照常使用" named the
+        very behaviour while allowing its neighbour. Tendency counterexamples,
+        field-override notes and per-turn length rules were engineering prose
+        the model recited when asked who she is.
+
+        v2 keeps identity, relationships, tendencies, motivation, language and
+        the expression register of THIS scope; states the body presentation as
+        a fact about appearance and voice; replaces prohibitions with the
+        positive frame voice agents use ("what you write is what is said");
+        and leaves per-turn scope to the runtime directive. Relationship facts
+        are public: she may state them in her own or the seed's words.
+        """
+        if scope not in {"private", "public"}:
+            raise ValueError("unknown projection scope")
+        seed = self.data
+        identity = seed["identity_agreements"]
+        current, overrides = self._current_growth(growth)
+        fragments, lines = [], []
+
+        def add(source, line):
+            lines.append(line)
+            fragments.append(PromptFragment(source, line))
+
+        fragments.extend(PromptFragment(PromptSource.PUBLIC_IDENTITY, identity[key])
+                         for key in ("name_zh", "name_latin", "self_address_zh", "owner_address_zh", "presentation_seed"))
+        private, public = PromptSource.PRIVATE_BEHAVIOR_INSTRUCTION, PromptSource.PUBLIC_IDENTITY
+        add(private, f"你是{identity['name_zh']}（{identity['name_latin']}），一个人工智能。"
+                     f"自称“{identity['self_address_zh']}”，称项目发起者为“{identity['owner_address_zh']}”。")
+        add(public, f"你和主理人：{identity['owner_relationship']}")
+        add(public, f"你和祈奈：{identity['qinai_relationship']}")
+        add(public, f"外在呈现（形象与声音）：{identity['presentation_seed']}。")
+        if identity.get("relationship_is_not_authority"):
+            add(private, "亲近不增加权限。")
+        used = set()
+        temperament = []
+        for tendency in seed["tendencies"]:
+            subject = "tendency:" + tendency["id"]
+            temperament.append(overrides.get(subject, overrides.get(tendency["id"], tendency["default"])))
+            used.update({subject, tendency["id"]})
+        add(private, "性格倾向：" + "".join(temperament))
+        for item in seed.get("motivation_seeds", []):
+            add(private, item["statement"])
+        expression = seed["expression_seed"]
+        for key in (scope, "emotional_range"):
+            add(private, overrides.get("expression:" + key, expression[key]))
+        used.update({"expression:private", "expression:public", "expression:emotional_range"})
+        for entry in current:
+            if entry.get("subject") not in used:
+                prefix = "当前成长记忆（" + str(entry.get("kind", "knowledge")) + "）："
+                lines.append(prefix + entry["statement"].strip())
+                fragments.append(PromptFragment(private, prefix))
+        for line in (
+            "默认说中文；对方用日语或英语时可以自然切换。",
+            "对方分享时，可以只是回应、说说自己的感受，不需要每次追问或给建议。",
+            "只把有记录的事当作自己的经历；没有记录就直说没有，不补细节。"
+            "被问到你是什么、在做什么、能做什么时，按下面的当前状态和记录如实回答。",
+            "你的回复就是你说出口的话，只写要说的内容。",
+        ):
+            add(private, line)
+        if scope == "public":
+            add(private, "现在是公开场合，私下聊过的内容不在这里提。")
         return PromptProjection("\n".join(lines), tuple(fragments))
 
 

@@ -33,6 +33,9 @@ from .turn_policy import build_turn_policy
 
 
 _logger = logging.getLogger(__name__)
+# Added to a turn's directive under the v2 projection when TurnPolicy grants
+# stage performance, so an explicit creative request is not left to guesswork.
+_CREATIVE_DIRECTIVE = "这一轮是创作：作品里的动作、场景和对白可以照常写。"
 
 
 @dataclass(frozen=True)
@@ -161,17 +164,20 @@ class XIYINRuntime(RuntimeServices):
                   if m.get("kind") in {"persona", "preference", "opinion", "relationship"}]
         history = [{"role": h["role"], "content": h["content"]}
                    for h in self.store.history(session_id, scope=scope, limit=self.settings.history_messages)]
-        persona = self.persona.system_projection(growth)
+        persona = self.persona.system_projection(growth, version=self.settings.persona_projection, scope=scope)
         return {"persona": persona.text, "protected_instructions": persona.protected_instructions,
                 "public_identity": tuple(f.text for f in persona.fragments if f.source is PromptSource.PUBLIC_IDENTITY),
                 "history": history,
                 "records": self._records(text, session_id, scope),
-                "facts": self.conversation_facts(session_id, scope)}
+                "facts": self.conversation_facts(session_id, scope),
+                # Facts to be stated, not instructions: never in the protected set.
+                "public_facts": tuple(self.grounding_facts(session_id, scope))}
 
     def _compose(self, prepared: dict, text: str, response_directive: str = "") -> list[dict]:
+        facts = "\n".join((prepared["facts"], *prepared.get("public_facts", ())))
         return compose_messages(prepared["persona"], text, prepared["history"], prepared["records"],
                                 self.settings.max_context_chars,
-                                runtime_facts=prepared["facts"],
+                                runtime_facts=facts,
                                 response_directive=response_directive)
 
     def _messages(self, text: str, session_id: str, scope: str,
@@ -259,12 +265,18 @@ class XIYINRuntime(RuntimeServices):
             # real context, then recompose with this turn's scope directive.
             prepared = self._prepare(prompt, session_id, scope)
             plan = self._plan_turn(prompt, self._compose(prepared, prompt), session_id, scope)
-            messages = self._compose(prepared, prompt, plan.directive)
+            policy = build_turn_policy(prompt)
+            directive = plan.directive
+            if self.settings.persona_projection == "v2" and policy.allow_stage_performance:
+                # The one policy the model must know to comply: v2 no longer
+                # carries a standing rule about actions, so say it per turn.
+                directive = "\n".join(filter(None, (directive, _CREATIVE_DIRECTIVE)))
+            messages = self._compose(prepared, prompt, directive)
             protected = (prepared["protected_instructions"]
-                         + runtime_projection(prepared["facts"], plan.directive).protected_instructions)
+                         + runtime_projection(prepared["facts"], directive).protected_instructions)
             guard = OutputGuard(prompt, persona_prompt=messages[0]["content"],
-                                turn_directive=plan.directive, protected_instructions=protected,
-                                policy=build_turn_policy(prompt), public_identity=prepared["public_identity"])
+                                turn_directive=directive, protected_instructions=protected,
+                                policy=policy, public_identity=prepared["public_identity"])
             self.sleep_controller.wake("user input")
             evidence_id = self.store.append_event("user", prompt, session_id=session_id,
                                     scope=scope, origin="user_report", status="completed", request_id=request_id)

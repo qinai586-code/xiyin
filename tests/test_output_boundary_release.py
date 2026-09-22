@@ -51,7 +51,8 @@ class OutputBoundaryReleaseTests(unittest.IsolatedAsyncioTestCase):
         self.count += 1
         store = ExperienceStore(self.directory / f"case-{self.count}.sqlite3")
         config = ProviderConfig("http://127.0.0.1:8080/v1", "xiyin")
-        runtime = XIYINRuntime(Settings(config, SEED, max_context_chars=20000), store,
+        # These fixtures echo v1 prompt lines; the v1 projection is kept for A/B.
+        runtime = XIYINRuntime(Settings(config, SEED, max_context_chars=20000, persona_projection="v1"), store,
                                provider=provider, authorize=lambda: None)
         self.addAsyncCleanup(runtime.shutdown)
         return runtime

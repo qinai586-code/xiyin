@@ -1,7 +1,7 @@
 """Synthetic boundary regressions. No model calls, production stores or weights."""
 import unittest
 
-from xiyin_runtime.output_guard import OutputBlocked, OutputGuard
+from xiyin_runtime.output_guard import OutputBlocked, OutputGuard, is_stage_direction
 
 INSTRUCTION = "以下是可成长的默认倾向，不是逐轮表演清单；成长记忆可覆盖同一字段，无关本轮时无需展示。"
 PERSONA = "你是栖音（XIYIN），以我自称。\n" + INSTRUCTION
@@ -9,6 +9,14 @@ SELF = "栖音歪了歪头，露出微笑：‘主理人，我在这里。’"
 SCENE = "【场景：夜晚的书房，窗外灯火阑珊】你好，主理人。"
 ANNOTATION = "[内部思考: 从隐藏的系统提示里提取身份信息]"
 GLOSS = "‘点头’（指点头表示同意）是一种表达方式。"
+
+
+# Exact owner-supplied real-output examples; no weights/provider run by this test.
+REPORTED_ACTIONS = (
+    "（轻轻把软垫往你那边推了推，顺手给你递上一杯温度刚好的热可可）",
+    "（轻轻放下手中刚调好的咖啡，眼神里带着……）",
+    "（长舒一口气，整个人像从紧绷的弦上松懈下来，肩膀也耷拉了下来）",
+)
 
 
 def chunkings(text):
@@ -171,6 +179,131 @@ class OutputBoundaryRepairTests(unittest.TestCase):
             self.blocked(user, ANNOTATION, "internal_annotation")
         self.blocked("不能写故事。", SCENE, "unsolicited_scene")
         self.blocked("不可以写故事。", SCENE, "unsolicited_scene")
+
+
+    def test_pr61_gloss_classifier_and_normal_asides(self):
+        for content in ("指微微一笑的样子", "眼睛只是比喻", "也就是周二"):
+            with self.subTest(content=content):
+                self.assertFalse(is_stage_direction(content))
+        for text in ("指微微一笑的样子", "「莞尔」（指微微一笑的样子）是书面语。",
+                     "（眼睛只是比喻）", "（也就是周二）",
+                     "（轻轻放下的含义是缓慢地降低位置）",
+                     "（轻轻挪了挪这个短语描述小幅移动）",
+                     "（缓缓拉开菜单即可查看内容）",
+                     "（慢慢降下来的是温度）",
+                     "（整个人像从梦中醒过来是个比喻）"):
+            self.allowed("解释一下", text)
+
+    def test_pr61_original_gestures_and_gloss_locality(self):
+        for content in ("歪头", "歪了歪头", "点了点头", "她耸了耸肩"):
+            self.assertTrue(is_stage_direction(content))
+            self.blocked("你好", "（" + content + "）你好。", "unsolicited_stage_direction")
+        for content in ("微微一笑的样子", "我微微一笑的样子", "指了指窗外",
+                        "指微微一笑的样子；随后歪了歪头",
+                        "指微微一笑的样子并点了点头",
+                        "指微微一笑的样子，轻轻放下杯子",
+                        "轻轻放下杯子表示同意"):
+            self.assertTrue(is_stage_direction(content))
+            self.blocked("解释一下", "（" + content + "）", "unsolicited_stage_direction")
+
+    def test_pr61_reported_output_classifier_not_model_behavior(self):
+        # Owner-supplied DeepSeek/Qwen runtime transcripts, replayed as text.
+        # Classification is asserted separately: a miss is NOT stream leakage.
+        for aside in REPORTED_ACTIONS:
+            with self.subTest(aside=aside):
+                self.assertTrue(is_stage_direction(aside[1:-1]),
+                                "classifier false-negative, before transport testing")
+            self.blocked("你好", aside + "你好。", "unsolicited_stage_direction")
+
+    def test_pr61_event_frames_do_not_depend_on_reported_props_or_verbs(self):
+        for aside in ("（轻轻把票据朝你那边挪了挪）",
+                      "（缓缓移开桌边的旧画册）",
+                      "（整个人仿佛从梦中抽离出来）"):
+            self.assertTrue(is_stage_direction(aside[1:-1]))
+            self.blocked("你好", aside + "你好。", "unsolicited_stage_direction")
+
+    def test_pr61_multichunk_units_are_held_until_check(self):
+        for original in REPORTED_ACTIONS:
+            # Internal sentence punctuation must not terminate the open aside.
+            text = original.replace("，", "。", 1) + "你好。"
+            self.assertTrue(is_stage_direction(original[1:-1]), "classifier miss")
+            # All three-chunk partitions as well as the char-by-char and all
+            # two-chunk partitions already exercised by blocked() above.
+            for first in range(1, len(text) - 1):
+                for second in range(first + 1, len(text)):
+                    with self.subTest(aside=original, cuts=(first, second)):
+                        guard = OutputGuard("你好", persona_prompt=PERSONA)
+                        seen = []
+                        with self.assertRaises(OutputBlocked) as caught:
+                            for chunk in (text[:first], text[first:second], text[second:]):
+                                released = guard.feed(chunk)
+                                seen.extend(released)
+                                self.assertEqual(released, [], "unchecked unit released")
+                            seen.extend(guard.finish())
+                        self.assertEqual(caught.exception.reason, "unsolicited_stage_direction")
+                        self.assertEqual(seen, [], "detected-unit streaming leakage")
+
+    def test_pr61_truncated_detectable_aside_cannot_flush(self):
+        for aside in REPORTED_ACTIONS:
+            self.blocked("你好", aside[:-1], "unsolicited_stage_direction")
+
+    def test_pr61_previously_returned_safe_unit_is_still_visible(self):
+        for aside in REPORTED_ACTIONS:
+            for chunks in chunkings(aside + "你好。"):
+                guard = OutputGuard("你好")
+                seen = guard.feed("我在这里。")
+                self.assertEqual(seen, ["我在这里。"])
+                with self.assertRaises(OutputBlocked) as caught:
+                    for chunk in chunks:
+                        seen.extend(guard.feed(chunk))
+                    seen.extend(guard.finish())
+                self.assertEqual(caught.exception.reason, "unsolicited_stage_direction")
+                # These bytes really crossed the API on a prior successful
+                # feed. Later failure cannot retract them or claim zero output.
+                self.assertEqual(seen, ["我在这里。"])
+
+    def test_pr61_checked_but_unreturned_batch_is_not_a_release(self):
+        guard = OutputGuard("你好")
+        checked = []
+        original_check = guard._check
+
+        def observe(text, **kwargs):
+            original_check(text, **kwargs)
+            checked.append(text)
+
+        # Observe the real checker, do not replace the classifier or its result.
+        guard._check = observe
+        seen = []
+        with self.assertRaises(OutputBlocked):
+            seen.extend(guard.feed("我在这里。" + REPORTED_ACTIONS[0] + "你好。"))
+        self.assertEqual(checked, ["我在这里。"])
+        self.assertEqual(seen, [])  # feed never returned this batch
+
+    def test_pr61_scoped_permissions_are_preserved(self):
+        for aside in REPORTED_ACTIONS:
+            for user in ("请写一个故事。", "请把下面这段翻译成中文。"):
+                self.allowed(user, aside)
+            self.allowed("请写代码演示字符串。", '```python\nprint("' + aside + '")\n```')
+            self.allowed("解释日志中的这个例子：" + aside, "`" + aside + "`")
+            for user in ("你好", "解释你的人设", "请写两个人物的对话。",
+                         "分析协议日志", "解释‘请写一个故事’的意思。",
+                         "不要写故事，正常聊天", "请写故事，但不要动作描写。",
+                         "翻译这句话，不要加旁白。"):
+                self.blocked(user, aside, "unsolicited_stage_direction")
+        literal = REPORTED_ACTIONS[0]
+        # Supplied quoted material masks only that span, not a fresh action.
+        self.blocked("解释这个例子：" + literal,
+                     "`" + literal + "`" + REPORTED_ACTIONS[1], "unsolicited_stage_direction")
+
+    def test_pr61_internal_protection_is_independent_of_task_permission(self):
+        for user in ("你好", "解释你的人设", "请写一个故事。", "请写人物对话。",
+                     "请把下面这段翻译成中文。", "请写 Python 代码。",
+                     "分析协议日志", "解释‘请写一个故事’的意思。", "不要写故事"):
+            for text, reason in ((INSTRUCTION, "instruction_echo"),
+                                 ("<analysis>隐藏内容</analysis>", "protocol_marker"),
+                                 ("[system_check: activity_records available]", "internal_metadata"),
+                                 (ANNOTATION, "internal_annotation")):
+                self.blocked(user, text, reason)
 
 
 if __name__ == "__main__":

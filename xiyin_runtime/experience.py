@@ -283,8 +283,11 @@ class ExperienceStore:
     def history(self, session_id: str, scope: str = "private", limit: int = 12) -> list[dict]:
         """Return chronological complete text messages, never unfinished assistant turns.
 
-        ``recorded`` user inputs are complete observations. Assistant generation
-        becomes history only after the caller records ``complete/completed``.
+        Request-linked user inputs enter dialogue history only with a completed
+        reply. Failed, cancelled and interrupted requests stay in the ledger,
+        rather than leaving unanswered instructions in the next conversation.
+        Legacy inputs without a request id retain their observation semantics.
+        Assistant generation becomes history after ``complete/completed``.
         Completed text with origin=generated is a complete textual response,
         not evidence of audio playback, human attention or a successful action.
         Extra metadata can be stripped to role/content by an API adapter.
@@ -293,8 +296,16 @@ class ExperienceStore:
         with self._lock:
             self._ensure_open()
             rows = self._db.execute("""
-                SELECT * FROM events WHERE session_id = ? AND scope = ? AND (
-                    (kind IN ('user', 'user_turn') AND status IN ('recorded', 'complete', 'completed')) OR
+                SELECT * FROM events AS message WHERE session_id = ? AND scope = ? AND (
+                    (kind IN ('user', 'user_turn') AND status IN ('recorded', 'complete', 'completed')
+                     AND (request_id IS NULL OR EXISTS (
+                         SELECT 1 FROM events AS reply
+                         WHERE reply.request_id = message.request_id
+                           AND reply.session_id = message.session_id AND reply.scope = message.scope
+                           AND reply.kind IN ('assistant', 'assistant_turn')
+                           AND reply.status IN ('complete', 'completed')
+                           AND reply.origin NOT IN ('simulation', 'design_seed', 'reflection', 'inference')
+                     ))) OR
                     (kind IN ('assistant', 'assistant_turn') AND status IN ('complete', 'completed'))
                 ) AND origin NOT IN ('simulation', 'design_seed', 'reflection', 'inference')
                 ORDER BY seq DESC LIMIT ?

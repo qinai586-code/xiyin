@@ -33,7 +33,8 @@ _DIRECTIVE = {
 
 # An explicit request about length always wins over the shape of the task.
 _ASK_SHORT = re.compile(
-    r"简短|简单说|简要|简洁|短一点|短些|少说|别太长|不要太长|长话短说|一句话|"
+    r"简短|(?<!不要)(?<!不用)(?<!不必)(?<!别)(?<!不)简单(?:地)?(?:说|讲|解释)|"
+    r"简要|简洁|短一点|短些|少说|别太长|不要太长|长话短说|一句话|"
     r"两句话|概括|总结一下就好|精简|直接说|快速说|"
     r"\bbrief(?:ly)?\b|\bin short\b|\bshort answer\b|\bone sentence\b|\btl;?dr\b", re.I)
 _ASK_LONG = re.compile(

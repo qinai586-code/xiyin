@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .prompt_provenance import PromptFragment, PromptProjection, PromptSource
+
 
 @dataclass(frozen=True)
 class Persona:
@@ -40,6 +42,10 @@ class Persona:
         return "\n".join(self._identity_lines())
 
     def system_prompt(self, growth: list[dict] | None = None) -> str:
+        """Return the unchanged model-facing projection."""
+        return self.system_projection(growth).text
+
+    def system_projection(self, growth: list[dict] | None = None) -> PromptProjection:
         """Build a prompt from scoped, current memories supplied by the caller.
 
         Subjects ``tendency:<id>`` and ``expression:<key>`` replace that seed
@@ -58,7 +64,20 @@ class Persona:
                      for entry in current
                      if entry.get("kind") in {"persona", "preference", "opinion"}}
         lines = self._identity_lines()
-        lines.append("以下是可成长的默认倾向，不是逐轮表演清单；成长记忆可覆盖同一字段，无关本轮时无需展示。")
+        # These field values are public identity metadata, not new prompt
+        # wording. The existing engineering projection ("你是…，以…自称")
+        # remains private; the names themselves must never become secrets.
+        identity = seed["identity_agreements"]
+        fragments = [PromptFragment(PromptSource.PUBLIC_IDENTITY, identity[key])
+                     for key in ("name_zh", "name_latin", "self_address_zh", "owner_address_zh", "presentation_seed")]
+        fragments.extend(PromptFragment(PromptSource.PRIVATE_BEHAVIOR_INSTRUCTION, line)
+                         for line in lines)
+
+        def add_instruction(line):
+            lines.append(line)
+            fragments.append(PromptFragment(PromptSource.PRIVATE_BEHAVIOR_INSTRUCTION, line))
+
+        add_instruction("以下是可成长的默认倾向，不是逐轮表演清单；成长记忆可覆盖同一字段，无关本轮时无需展示。")
         used = set()
         for tendency in seed["tendencies"]:
             subject = "tendency:" + tendency["id"]
@@ -66,24 +85,29 @@ class Persona:
             used.update({subject, tendency["id"]})
             # Design labels identify fields in the seed, not words the character
             # must say. Preserve the meaning and growth override, not the label.
-            lines.append(f"{value} {tendency['counterexample']}")
-        lines.extend(item["statement"] for item in seed.get("motivation_seeds", []))
+            add_instruction(f"{value} {tendency['counterexample']}")
+        for item in seed.get("motivation_seeds", []):
+            add_instruction(item["statement"])
         expression = seed["expression_seed"]
-        lines.append("中文为默认语言，日语与英语随场景自然使用；换语言保留同一个人的注意方式与关系分寸。")
+        add_instruction("中文为默认语言，日语与英语随场景自然使用；换语言保留同一个人的注意方式与关系分寸。")
         for key in ("private", "public", "emotional_range"):
             subject = "expression:" + key
-            lines.append(overrides.get(subject, expression[key]))
+            add_instruction(overrides.get(subject, expression[key]))
             used.add(subject)
         for entry in current:
             if entry.get("subject") not in used:
-                lines.append("当前成长记忆（" + str(entry.get("kind", "knowledge")) + "）："
-                             + entry["statement"].strip())
-        lines.extend([
+                prefix = "当前成长记忆（" + str(entry.get("kind", "knowledge")) + "）："
+                lines.append(prefix + entry["statement"].strip())
+                # Supplementary memory is still conversational data. Protect
+                # the internal wrapper, not a person's statement or a fact.
+                fragments.append(PromptFragment(PromptSource.PRIVATE_BEHAVIOR_INSTRUCTION, prefix))
+        for line in [
             "回应本轮要做的事：简单确认可以短，复杂解释与创作按需要展开，内容完成就结束。长短、少建议、少追问等要求只作用于本轮，不自动成为长期偏好。",
             "对方分享时可以关心、表达感受或有不同看法，不必追问、提建议或另起话题来证明亲近。",
             "平常直接交流，不朗读人设守则、内部标签或括号动作旁白；明确要求创作时可写动作。正常括号说明、表情、感受、愿望、玩笑和明确想象照常使用，没有固定口头禅或篇幅。",
-        ])
-        return "\n".join(lines)
+        ]:
+            add_instruction(line)
+        return PromptProjection("\n".join(lines), tuple(fragments))
 
 
 def load_persona(path: Path) -> Persona:

@@ -1,5 +1,17 @@
 # XIYIN Runtime Architecture
 
+## Output-boundary follow-up (2026-09-22)
+
+PR #6 baseline `c6bb054` failed the supplied Windows real-model acceptance; its old synthetic PASS is not a behavioral acceptance verdict. This follow-up preserves the character seed, model-facing persona text, weights and sampling configuration.
+
+Runtime constructs one immutable `TurnPolicy` before generation. Markdown list framing is separate from permission classification; a list marker cannot open an emphasis scope. Local quoted/code/definition spans permit mentioning an action without authorizing an adjacent performance.
+
+Persona projections now carry trusted `PUBLIC_IDENTITY`, `PRIVATE_BEHAVIOR_INSTRUCTION` and `PRIVATE_RUNTIME_DIRECTIVE` provenance alongside unchanged model text. Retrieved records cannot assign themselves these labels. Known private source sentences are checked before text/TTS release, including short opening sentences and a bounded known prefix crossing an inserted sentence stop. Public identity facts remain expressible; a public fact is not permission to dump private instructions. These checks remain structural/lexical, not a semantic confidentiality oracle: arbitrary paraphrases, encodings and ambiguous uses still require real-model evaluation.
+
+Conversation history excludes request-linked user prompts whose reply failed, was cancelled, or remained partial. Original ledger events and memory/action receipts remain intact. Explicit natural brevity requests such as “简单解释一下” are recognized independently of this boundary repair.
+
+The new tests replay reported failures with synthetic providers, temporary stores and TTS sinks. They do not establish that Qwen3.5-4B now follows the character naturally, or that changing model size is necessary. Windows and actual-weight acceptance remain required before PR #6 can be considered ready to merge.
+
 实现依据是主理人提供的 `XIYIN_Architecture_v1.1_Design.md`（SHA-256 `883b5514df39dd44aa8972e88a309a652e19debb793a08e0955a4710b37faa8b`）、v1.0.1 两张语音图和 Character Bible v0.2。功能仍沿用原 M1–M10；Runtime / Body / Lab / Supervisor 是职责分组，不是四个大模型。本文件记录代码中的对应关系，不将设计要求标成已实测能力。
 
 原稿现已入档到 `docs/`：`XIYIN_Architecture_v1.0.md`、`XIYIN_Architecture_v1.1_Design.md`（两者各有一节 2026-09-20 修订记录，逐条列出被更晚记录取代的决定及依据）、`docs/research/XIYIN_REFERENCE_REPOSITORIES_FULL.md`（按该索引 §17，参考索引只留在文档区，不进运行路径）。v1.1 入档副本的哈希与上面引用的一致，确认代码依据的就是这一份。

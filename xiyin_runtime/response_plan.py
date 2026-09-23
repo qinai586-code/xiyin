@@ -30,10 +30,18 @@ _DIRECTIVE = {
     "detailed": "这一轮对方要展开说明：把需要的部分讲完整，可以分点或举例，讲完就结束，不为凑长度重复。",
     "extended": "这一轮是长内容任务：按结构写完整，需要多少写多少；写完就结束，不复述已经写过的部分。",
 }
+# Two requested sections in one turn. The detail budget holds both; the
+# directive keeps the order the owner asked for.
+_SECTIONED = {
+    "summary_then_detail": "这一轮对方要先一句话总结，再展开：先用一句话给出结论，再把需要的部分讲完整，讲完就结束。",
+    "detail_then_summary": "这一轮对方要展开说明，最后再用一句话总结：把需要的部分讲完整，结尾一句话收住。",
+}
 
 # An explicit request about length always wins over the shape of the task.
-# Polarity is read per clause (see _length_request): "别只简单讲讲" and
-# "不用展开" flip, "简单问题" is not a request at all.
+# What counts is the effective request (see _effective_request): a quoted or
+# defined word is a mention, a later correction replaces an earlier request,
+# "先…再…" asks for two sections, and a negator changes the meaning in
+# different ways ("别只简单讲讲" wants more, "不需要简短" only lifts a limit).
 _ASK_SHORT = re.compile(
     r"简短|简单(?:地|点|一点|些)?(?:说|讲|解释|介绍|聊|回答)(?!不[了清来])|[说讲]简单点|"
     r"简要|简洁|短一点|短些|少说|别太长|不要太长|长话短说|一句话|一两句|"
@@ -42,8 +50,22 @@ _ASK_SHORT = re.compile(
 # A negator right before the request, allowing a few fillers ("别只…",
 # "不是要你…", "我不想听…", "不需要太…"). Not any "不" earlier in the clause.
 _NEGATED = re.compile(
-    r"(?:不要|不用|不必|不需要|没必要|无需|不想|不是要?|别|不)"
-    r"(?:你|我|给我|听|只是|只|仅|太|那么|再)?(?:只是|只|仅|太)?\s*$")
+    r"(?P<neg>不要|不用|不必|不需要|没必要|无需|不想|不是要?|别|不)"
+    r"(?:你|我|给我|听)?(?P<mod>只是|只|仅|太|那么|再)?\s*$")
+# "No need to be brief" lifts a limit; "don't give me a simple one" rejects it.
+_NEED_NOT = frozenset({"不用", "不必", "不需要", "没必要", "无需"})
+# A word being defined or quoted is not a request for that length.
+_MENTION_AFTER = re.compile(
+    r"^\s*[”\"’'」』`]?\s*(?:这个词|一词|这两个字|这个字|的意思|是什么意思|什么意思|指什么|怎么理解|"
+    r"怎么写|怎么读|的用法|怎么用)")
+_QUOTE_SPAN = re.compile(r"“[^”\n]{1,24}”|‘[^’\n]{1,24}’|\"[^\"\n]{1,24}\"|「[^」\n]{1,24}」|『[^』\n]{1,24}』|`[^`\n]{1,24}`")
+# A later clause that revises the request ("不，还是一句话", "算了，详细点"):
+# either it opens with a revision word, or it follows a bare "不，"/"算了，".
+# A clause that merely starts with 不 ("不用展开") is a negation, not a revision.
+_CORRECTION = re.compile(r"^\s*(?:还是|算了|改成|换成|改为|重新|其实还是|要不还是)")
+_BARE_CORRECTION = frozenset({"不", "不对", "不是", "算了", "不不"})
+_FIRST = re.compile(r"先")
+_THEN = re.compile(r"然后|再|接着|之后|最后")
 _ASK_LONG = re.compile(
     r"详细|详尽|具体说|展开说?|深入|完整地?|全面|逐条|逐步|分点|分条|多说(?:一?点|些)|"
     r"长一点|详解|细说|说透|讲透|一步一步|从头(?:讲|说)|"
@@ -96,20 +118,77 @@ class ResponsePlan:
                 "context_tokens": self.context_tokens,
                 "measured_tokens_per_second": (round(self.measured_rate, 2)
                                                if self.measured_rate else None),
+                # Whether the scope came from the owner's words or was inferred
+                # from the task; only the former may appear in the directive.
+                "requested_by_owner": self.reason.startswith("owner_"),
+                "directive_sent": bool(self.directive),
                 "is_length_cap": False}
 
 
-def _length_request(value: str) -> tuple[bool, bool]:
-    """(asked for short, asked for long), with negation read per clause."""
-    short = long = False
-    for clause in re.split(r"[，,。；;！!？?\n]", value):
+def _requests(value: str) -> list[tuple[int, str, str]]:
+    """Every length request in order: (clause index, kind, clause text).
+
+    ``kind`` is "short", "long" or "declined_short". Mentions are skipped.
+    """
+    found = []
+    for index, clause in enumerate(re.split(r"[，,。；;！!？?\n]", value)):
         for pattern, is_short in ((_ASK_SHORT, True), (_ASK_LONG, False)):
             for match in pattern.finditer(clause):
-                if is_short != bool(_NEGATED.search(clause[:match.start()])):
-                    short = True
+                if _MENTION_AFTER.match(clause[match.end():]):
+                    continue
+                quoted = next((span for span in _QUOTE_SPAN.finditer(clause)
+                               if span.start() < match.start() and match.end() < span.end()), None)
+                if quoted and _MENTION_AFTER.match(clause[quoted.end():]):
+                    continue
+                negation = _NEGATED.search(clause[:match.start()])
+                if not negation:
+                    kind = "short" if is_short else "long"
+                elif not is_short:
+                    kind = "short"  # "不用展开", "不需要太详细"
+                elif negation["mod"] in {"只", "只是", "仅"}:
+                    kind = "long"   # "别只简单讲讲"
+                elif negation["mod"] in {"太", "那么"} or negation["neg"] in _NEED_NOT:
+                    kind = "declined_short"  # "不需要简短", "别太简短"
                 else:
-                    long = True
-    return short, long
+                    kind = "long"   # "我不想听简单解释", "不要简单讲一下"
+                found.append((index, kind, clause))
+    return found
+
+
+def _effective_request(value: str) -> tuple[str | None, str]:
+    """The request the turn actually makes, and why, from all of its clauses."""
+    requests = _requests(value)
+    if not requests:
+        return None, ""
+    clauses = re.split(r"[，,。；;！!？?\n]", value)
+    # A correction replaces what came before it: the last request that is
+    # itself marked as a revision, or that follows a bare "不，"/"算了，".
+    for index, kind, clause in reversed(requests):
+        previous = clauses[index - 1].strip() if index else ""
+        if _CORRECTION.match(clause) or previous in _BARE_CORRECTION:
+            return kind, "corrected"
+    kinds = [kind for _, kind, _ in requests]
+    wants = {kind for kind in kinds if kind != "declined_short"}
+    if wants == {"short", "long"}:
+        first_short = next(i for i, kind, _ in requests if kind == "short")
+        first_long = next(i for i, kind, _ in requests if kind == "long")
+        ordered = (_FIRST.search(clauses[min(first_short, first_long)])
+                   or _THEN.search(clauses[max(first_short, first_long)]))
+        if ordered and first_short < first_long:
+            return "summary_then_detail", "sections"
+        if ordered and first_long < first_short:
+            return "detail_then_summary", "sections"
+        return "summary_then_detail", "both"
+    if wants:
+        return wants.pop(), "asked"
+    return "declined_short", "asked"
+
+
+def _length_request(value: str) -> tuple[bool, bool]:
+    """(asked for short, asked for long) after resolving the effective request."""
+    kind, _ = _effective_request(value)
+    return kind in {"short", "summary_then_detail", "detail_then_summary"}, \
+        kind in {"long", "summary_then_detail", "detail_then_summary"}
 
 
 def classify(text: str, *, engagement: float = 0.0) -> tuple[str, str]:
@@ -120,13 +199,18 @@ def classify(text: str, *, engagement: float = 0.0) -> tuple[str, str]:
     state cannot turn "briefly" into an essay.
     """
     value = text.strip()
-    short, long = _length_request(value)
-    # Both asked ("详细说明，但先简单说结论"): a detail budget can still put the
-    # conclusion first; a brief budget cannot hold the detail.
-    if long:
-        return "detailed", "owner_asked_for_detail"
-    if short:
-        return "brief", "owner_asked_for_brevity"
+    kind, how = _effective_request(value)
+    suffix = "+corrected" if how == "corrected" else ""
+    if kind in _SECTIONED:
+        # Both asked: a detail budget can still put the conclusion first; a
+        # brief budget cannot hold the detail.
+        return "detailed", "owner_asked_for_" + kind + suffix
+    if kind == "long":
+        return "detailed", "owner_asked_for_detail" + suffix
+    if kind == "short":
+        return "brief", "owner_asked_for_brevity" + suffix
+    if kind == "declined_short":
+        return "normal", "owner_declined_brevity"
     if _CLOSED.match(value):
         return "minimal", "greeting_or_acknowledgement"
     if _CONFIRMATION.search(value) and len(value) <= 40:
@@ -138,6 +222,21 @@ def classify(text: str, *, engagement: float = 0.0) -> tuple[str, str]:
     if engagement >= 0.6:
         return "normal", "ordinary_turn_engaged"
     return "normal", "ordinary_turn"
+
+
+def _directive(scale: str, reason: str) -> str:
+    """What the turn's directive may say: only what the owner actually asked.
+
+    A task that needs room gets the room (a ceiling is a resource limit) but
+    no sentence claiming "对方要展开说明": the owner did not ask for it, and
+    that false claim pushed casual "为什么" questions into lectures and lists.
+    """
+    for kind, text in _SECTIONED.items():
+        if reason.startswith("owner_asked_for_" + kind):
+            return text
+    if reason.startswith("task_needs_room"):
+        return ""
+    return _DIRECTIVE[scale]
 
 
 def plan_response(text: str, *, prompt_tokens: int, context_tokens: int, ceiling: int,
@@ -152,7 +251,7 @@ def plan_response(text: str, *, prompt_tokens: int, context_tokens: int, ceiling
     rate = measured_rate if measured_rate and measured_rate > 0 else default_rate
     timeout = min(max_timeout, max(_MIN_TIMEOUT, _MIN_TIMEOUT + budget / rate * 1.5))
     return ResponsePlan(scale=scale, max_tokens=int(budget), timeout_seconds=float(timeout),
-                        directive=_DIRECTIVE[scale], reason=reason,
+                        directive=_directive(scale, reason), reason=reason,
                         context_tokens=context_tokens, measured_rate=measured_rate)
 
 

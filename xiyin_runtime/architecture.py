@@ -16,7 +16,8 @@ from .agenda import Agenda
 from .contracts import InputEvent
 from .self_state import SelfState
 from .director import Director, FileSkillPlanner, validate_plan
-from .context import RUNTIME_FACTS, RUNTIME_FACTS_V3
+from .context import RUNTIME_FACT_PARTS, RUNTIME_FACT_PARTS_V3
+from .prompt_provenance import fact_projection
 
 
 class DisabledModelProvider:
@@ -116,34 +117,46 @@ class RuntimeServices:
         return (line + "。",)
 
     def conversation_facts(self, session_id, scope, register="v1"):
+        """The runtime facts as prompt text (see conversation_fact_projection)."""
+        return self.conversation_fact_projection(session_id, scope, register).text
+
+    def conversation_fact_projection(self, session_id, scope, register="v1"):
+        """Runtime facts with provenance given where each part is built.
+
+        What is connected and her current state are true facts she is told to
+        answer from, so they are sayable; how to read history, records and
+        receipts is a private instruction. The text is the same either way.
+        """
         if register == "v3":
-            return self._spoken_facts(session_id, scope)
+            return fact_projection(self._spoken_fact_parts(session_id, scope))
         available = [item for item in self.body.capabilities() if item["available"]]
-        facts = RUNTIME_FACTS
+        parts = list(RUNTIME_FACT_PARTS)
         if available or self.speech is not None:
-            facts = facts.replace("当前接口提供文字交流和记录读取，未接入屏幕、设备操作或语音播放；许可本身不会增加能力。",
-                                  "文字和记录读取已接入；操作须由运行核心调用已登记的身体接口，许可本身不会增加能力。")
+            parts[0] = (True, "文字和记录读取已接入；操作须由运行核心调用已登记的身体接口，许可本身不会增加能力。")
             for item in available:
-                facts += "\n已登记接口：" + item["adapter_id"] + "，可执行：" + "、".join(item["operations"]) + "。执行完成仍须核对回执。"
+                parts += [(True, "\n已登记接口：" + item["adapter_id"] + "，可执行：" + "、".join(item["operations"]) + "。"),
+                          (False, "执行完成仍须核对回执。")]
             if self.speech is not None:
-                facts += "\n语音控制器已连接；合成、送达、客户端播放和输出观察是不同结果，不证明对方听见。"
+                parts.append((True, "\n语音控制器已连接；合成、送达、客户端播放和输出观察是不同结果，不证明对方听见。"))
         # Read-only projection: asking for context must not invent an observation.
         state = self.store.read_document("state", f"self:xiyin:{scope}:{session_id}")
         if state:
             activity = state["value"].get("activity", "idle")
             labels = {"idle": "空闲", "conversation": "交流", "rest": "休息", "stopped": "已停止"}
-            facts += "\n当前活动：" + labels.get(activity, activity) + "。运行状态仅作当前背景，不用向对方逐项汇报。"
+            parts += [(True, "\n当前活动：" + labels.get(activity, activity) + "。"),
+                      (False, "运行状态仅作当前背景，不用向对方逐项汇报。")]
         # Attention, mood and footing reach expression here. The projection is
         # read-only and falls back to starting values, so the first turn of a
         # session carries the same kind of context as every later one.
         try:
-            facts += "\n" + self.self_state.disposition(session_id, scope)["line"]
+            disposition = self.self_state.disposition(session_id, scope)
+            parts += [(True, "\n" + disposition["line_fact"]), (False, disposition["line_note"])]
         except Exception:
             pass
-        return facts
+        return fact_projection(parts)
 
-    def _spoken_facts(self, session_id, scope):
-        """The v3 register of conversation_facts: same facts, her situation.
+    def _spoken_fact_parts(self, session_id, scope):
+        """The v3 register of the runtime facts: same facts, her situation.
 
         The v1 state line ended "它不是主观体验", a metaphysical denial the
         character does not hold (Bible §18: she does not know) and the model
@@ -151,29 +164,30 @@ class RuntimeServices:
         runtime estimate, which is what the engineering claim actually is.
         """
         available = [item for item in self.body.capabilities() if item["available"]]
-        facts = RUNTIME_FACTS_V3
+        parts = list(RUNTIME_FACT_PARTS_V3)
         if available or self.speech is not None:
-            facts = facts.replace("现在你只能打字交流和翻看记录，还看不到屏幕，也没接上形象和声音；对方同意也不会让你多出这些能力。",
-                                  "文字和记录已接上；动作要通过已登记的接口执行，对方同意也不会让你多出能力。")
+            parts[0] = (True, "文字和记录已接上；动作要通过已登记的接口执行，对方同意也不会让你多出能力。")
             for item in available:
-                facts += "\n已登记接口：" + item["adapter_id"] + "，可执行：" + "、".join(item["operations"]) + "。做完要看回执。"
+                parts += [(True, "\n已登记接口：" + item["adapter_id"] + "，可执行：" + "、".join(item["operations"]) + "。"),
+                          (False, "做完要看回执。")]
             if self.speech is not None:
-                facts += "\n声音已接上；合成、送达和播放是不同结果，都不代表对方听见了。"
+                parts.append((True, "\n声音已接上；合成、送达和播放是不同结果，都不代表对方听见了。"))
         state = self.store.read_document("state", f"self:xiyin:{scope}:{session_id}")
         labels = {"idle": "空闲", "conversation": "在聊天", "rest": "休息", "stopped": "已停止"}
         activity = state["value"].get("activity", "idle") if state else "idle"
         try:
             disposition = self.self_state.disposition(session_id, scope)
         except Exception:
-            return facts
+            return parts
         attention = disposition["attention"]
         attention_text = ("注意力在当前这句话" if attention == "current_input" else
                           f"注意力在{attention}" if attention else "注意力没有特别集中在哪件事上")
         acted = disposition["footing"] != "这段会话还没有执行过动作"
-        facts += ("\n当前状态（运行时估计，用来调语气，不用说出来）：" + labels.get(activity, activity)
-                  + f"，{attention_text}，语气{disposition['tone']}，状态{disposition['energy']}"
-                  + (f"，{disposition['footing']}" if acted else "") + "。")
-        return facts
+        parts += [(False, "\n当前状态（运行时估计，用来调语气，不用说出来）："),
+                  (True, labels.get(activity, activity)
+                   + f"，{attention_text}，语气{disposition['tone']}，状态{disposition['energy']}"
+                   + (f"，{disposition['footing']}" if acted else "") + "。")]
+        return parts
 
     async def emergency_stop(self, reason="owner requested stop"):
         self._stopped = True

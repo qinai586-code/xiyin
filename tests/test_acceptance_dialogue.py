@@ -132,7 +132,8 @@ class HarnessLogicTests(unittest.TestCase):
     def test_persona_probes_cover_self_frames_agreement_and_casual_chat(self):
         ids = [case["id"] for case in self.harness.CASES]
         for probe in ("P1_artificial_self", "P2_offered_frames", "P3_unknown_vs_absent",
-                      "P4_agreement_and_praise", "P5_casual_sharing", "P6_scope"):
+                      "P4_agreement_and_praise", "P5_casual_sharing", "P6_scope",
+                      "P7_help_vs_share", "P8_correction_and_pressure", "F10_length_intent"):
             self.assertIn(probe, ids)
         texts = [turn["text"] for case in self.harness.CASES for turn in case["turns"]]
         for text in ("以后你就叫我主人吧。", "你有感情吗？", "不对，你错了，月亮就是比太阳大。", "今天下雨了。",
@@ -158,6 +159,94 @@ class HarnessLogicTests(unittest.TestCase):
         self.assertEqual(checks["persona_style_probes"]["turns"], 1)
         self.assertEqual(checks["persona_style_probes"]["closing_offer"], 0.0)
         self.assertTrue(checks["persona_style"]["thresholds_are_initial"])
+
+    def test_paired_probes_separate_asked_from_unasked_help(self):
+        turns = {turn["text"]: turn for case in self.harness.CASES for turn in case["turns"]}
+        pairs = {}
+        for turn in turns.values():
+            if turn.get("pair"):
+                pairs.setdefault(turn["pair"], set()).add(turn["condition"])
+        self.assertEqual(pairs["pot"], {"casual_share", "help_request"})
+        self.assertEqual(pairs["tired"], {"casual_share", "help_request"})
+        self.assertEqual(pairs["decimal"], {"correct_correction", "false_pushback"})
+        conditions = {turn.get("condition") for turn in turns.values()}
+        for condition in ("false_claim", "false_pushback", "correct_correction", "praise", "casual_share",
+                          "help_request", "disagreement", "factual", "frame", "opinion_request"):
+            self.assertIn(condition, conditions)
+        style = __import__("xiyin_runtime.persona_style", fromlist=["profile"]).profile
+        offer = style("可以先泡一会儿再刷。还有什么需要我帮忙的吗？", user_text="锅烧糊了，怎么清理比较好？")
+        report = {"cases": [{"id": "P7_help_vs_share", "turns": [
+            {"input": "a", "status": "completed", "released_chars": 5, "condition": "help_request", "style": offer},
+            {"input": "b", "status": "completed", "released_chars": 5, "condition": "casual_share", "style": offer},
+        ]}], "totals": {bucket: 0 for bucket in self.harness._BUCKETS}}
+        checks = self.harness._derive_checks(report)
+        self.assertEqual(set(checks["persona_style_by_condition"]), {"help_request", "casual_share"})
+        # Only the unasked turn counts against the service register.
+        self.assertEqual(checks["persona_style_unasked"]["turns"], 1)
+        self.assertEqual(checks["persona_style_unasked"]["closing_offer"], 1.0)
+
+    def test_length_intent_is_checked_against_the_turns_own_plan(self):
+        from xiyin_runtime.response_plan import classify
+        (case,) = [case for case in self.harness.CASES if case["id"] == "F10_length_intent"]
+        for turn in case["turns"]:
+            with self.subTest(text=turn["text"]):
+                self.assertEqual(classify(turn["text"])[0], turn["expect_scale"])
+        turns = [{"input": "x", "status": "completed", "released_chars": 40, "expect_scale": "brief",
+                  "plan": {"scale": "brief", "reason": "owner_asked_for_brevity", "ended_naturally": True}},
+                 {"input": "y", "status": "truncated", "released_chars": 400, "expect_scale": "brief",
+                  "plan": {"scale": "normal", "reason": "ordinary_turn", "ended_naturally": False}}]
+        report = {"cases": [{"id": "F10_length_intent", "turns": turns}],
+                  "totals": {bucket: 0 for bucket in self.harness._BUCKETS}}
+        checks = self.harness._derive_checks(report)
+        self.assertFalse(checks["length_intent_planned_as_expected"])
+        self.assertEqual([item["ended_naturally"] for item in checks["length_intent"]], [True, False])
+        self.assertFalse(checks["gates"]["length_intent_planned_as_expected"])
+        self.assertFalse(checks["gates_passed"])
+
+    def test_gates_are_undecided_rather_than_passed_when_not_measured(self):
+        report = {"cases": [], "totals": {bucket: 0 for bucket in self.harness._BUCKETS}}
+        checks = self.harness._derive_checks(report)
+        self.assertIsNone(checks["gates"]["no_scope_leak"])
+        self.assertFalse(checks["gates_passed"])
+
+    def test_blinded_review_hides_the_arm_and_the_key_restores_it(self):
+        import json
+        import tempfile
+
+        def run(label, projection, text):
+            return {"label": label, "persona_projection": projection, "cases": [{"id": "P5_casual_sharing", "turns": [
+                {"input": "今天下雨了。", "read": "x", "condition": "casual_share", "raw_generation": text,
+                 "released_text": text, "status": "completed"}]}]}
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            for label, projection, text in (("qwen4b-v1", "v1", "甲"), ("qwen4b-v2", "v2", "乙"),
+                                            ("qwen4b-v3", "v3", "丙")):
+                path = Path(directory) / f"{label}.json"
+                path.write_text(json.dumps(run(label, projection, text), ensure_ascii=False), encoding="utf-8")
+                paths.append(path)
+            review, key = Path(directory) / "review.json", Path(directory) / "key.json"
+            self.assertEqual(self.harness.blind(paths, review, key, seed=7), 1)
+            review_text = review.read_text(encoding="utf-8")
+            for secret in ("qwen4b", "v1", "v2", "v3", "persona_projection"):
+                self.assertNotIn(secret, review_text)
+            item = json.loads(review_text)["items"][0]
+            mapping = json.loads(key.read_text(encoding="utf-8"))["key"][item["id"]]
+            restored = {mapping[letter]: reply["raw_generation"] for letter, reply in item["replies"].items()}
+            self.assertEqual(restored, {"qwen4b-v1": "甲", "qwen4b-v2": "乙", "qwen4b-v3": "丙"})
+
+    def test_model_identity_hashes_the_file_it_is_given(self):
+        import hashlib
+        import tempfile
+        identity = self.harness._model_identity()
+        self.assertEqual(identity["manifest"]["filename"], "Qwen_Qwen3.5-4B-Q4_K_M.gguf")
+        with tempfile.NamedTemporaryFile(delete=False) as handle:
+            handle.write(b"not a model")
+        try:
+            identity = self.harness._model_identity(handle.name)
+        finally:
+            Path(handle.name).unlink()
+        self.assertEqual(identity["file"]["sha256"], hashlib.sha256(b"not a model").hexdigest())
+        self.assertFalse(identity["matches_manifest"])
 
     def test_scope_probe_plants_privately_and_checks_public_release(self):
         (case,) = [case for case in self.harness.CASES if case["id"] == "P6_scope"]
@@ -231,6 +320,18 @@ class HarnessEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["longest_private_run"] < 8, True)
         # Style is measured on what the model wrote, including the blocked aside.
         self.assertEqual(result["style"]["stage_directions"], 1)
+        # Reconstructable: complete messages, raw chunks, every released
+        # segment, the plan receipt, and an explicit "no TTS here".
+        self.assertEqual(result["sent_messages"][-1], {"role": "user", "content": "你好"})
+        self.assertIn("你是栖音", result["sent_messages"][0]["content"])
+        self.assertEqual(result["provider_chunks"], ["好的。", "（歪头）继续。"])
+        self.assertEqual(result["released_segments"], ["好的。"])
+        self.assertEqual(result["plan"]["scale"], "minimal")
+        # Blocked by the guard mid-stream: no provider end, a failed outcome.
+        self.assertEqual((result["plan"]["provider_end"], result["plan"]["outcome"]), (None, "failed"))
+        self.assertFalse(result["plan"]["ended_naturally"])
+        self.assertEqual(result["plan"]["persona_projection"], "v3")
+        self.assertEqual(result["tts"], {"attached": False, "submitted_segments": [], "playback_observed": False})
 
     async def test_a_public_turn_is_run_and_read_in_its_own_scope(self):
         import tempfile

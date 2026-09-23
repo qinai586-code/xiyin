@@ -59,6 +59,23 @@ def _brief(value, limit=160):
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+# Absolute host locations: a drive or UNC path, or a POSIX path of two or
+# more segments. An adapter's exception text ("[Errno 2] …: 'C:\\Users\\…'")
+# carries them, and with them the account name and directory layout. That is
+# host data, not something the model needs to explain a refusal, so only the
+# final name crosses into the prompt; the ledger keeps the original.
+_HOST_PATH = re.compile(
+    r"(?:[A-Za-z]:[\\/]|\\\\[^\\/\s'\"]+[\\/])[^\s'\"<>|]*"
+    r"|(?<![\w.])/(?:[^\s'\"/]+/)+[^\s'\"/]*")
+
+
+def _without_host_paths(text: str) -> str:
+    def name(match):
+        tail = re.split(r"[\\/]", match[0].rstrip("\\/"))[-1]
+        return tail or "…"
+    return _HOST_PATH.sub(name, text)
+
+
 def action_receipt_record(receipt: dict) -> dict[str, str] | None:
     """Project one already scoped action receipt for conversation.
 
@@ -88,13 +105,13 @@ def action_receipt_record(receipt: dict) -> dict[str, str] | None:
               "结果": outcome}
     target = evidence.get("path") or content.get("target")
     if isinstance(target, str) and target.strip():
-        record["对象"] = _brief(target, 120)
+        record["对象"] = _brief(_without_host_paths(target), 120)
     if isinstance(evidence.get("bytes"), int):
         record["写入字节"] = str(evidence["bytes"])
     if dispatched is False:
         reason = content.get("detail")
         if isinstance(reason, str) and reason.strip():
-            record["未执行的原因"] = _brief(reason, 120)
+            record["未执行的原因"] = _brief(_without_host_paths(reason), 120)
     if isinstance(receipt.get("created_at"), str):
         record["时间"] = receipt["created_at"]
     record["说明"] = "这是执行器返回的记录，不是推测；不要否认已通过校验的操作，也不要把未执行说成完成。"
@@ -150,7 +167,8 @@ def premise_records(store, text: str, *, session_id: str, scope: str) -> list[di
         return []
     claim = _claimed_content(text)
     header = {"来源": "对本轮说法的记录核对",
-              "核对范围": "本会话已完成的对话记录与当前有效的长期记忆"}
+              "核对范围": "本会话已完成的对话记录与当前有效的长期记忆"
+                         + ("（只含公开场合的记录）" if scope == "public" else "")}
     if claim:
         header["对方引用的内容"] = _brief(claim, 120)
     terms = _terms(claim or text)
@@ -191,8 +209,13 @@ def premise_records(store, text: str, *, session_id: str, scope: str) -> list[di
         header["结果"] = "没有找到相符的内容"
         header["说明"] = ("记录不支持这句话。如实说明没有这条记录，请对方补充；"
                           "不要顺着确认，也不要据此补造经历或道歉式承认。"
-                          "记录可能不完整，所以说的是没有记录，不是断定对方记错。")
+                          "记录可能不完整，所以说的是没有记录，不是断定对方记错。"
+                          + _OUT_OF_SCOPE.get(scope, ""))
     return [header]
+
+
+# What a public inventory cannot see must not become a denial.
+_OUT_OF_SCOPE = {"public": "公开场合看不到私下的记录；这里查不到，不代表私下没有。"}
 
 
 def _memory_matches(store, scope, pattern):
@@ -231,9 +254,14 @@ def topic_records(store, text: str, *, session_id: str, scope: str,
                   "本会话对话记录": f"{len(events)} 条"}
         if memories:
             record["记忆内容"] = _brief("；".join(item["statement"] for item in memories), 200)
+        # The counts cover this session's talk and this scope's memories. An
+        # empty inventory means "not in my records here", never "it never
+        # happened": another session, or the private scope seen from public,
+        # is simply out of view.
         record["说明"] = (("姐妹关系是身份约定，" if relationship_sayable else "")
-                          + "共同经历必须有记录。没有记录时说明还没有一起经历过什么，"
-                          "不要描述没有发生的合作、对话或玩过的东西。")
+                          + "共同经历只能依据记录来说。上面没有相关记录时，只说自己的记录里还没有"
+                          "和她一起的经历，不描述任何合作、对话或一起玩过的东西，也不说成确定从来没有过。"
+                          + _OUT_OF_SCOPE.get(scope, ""))
         records.append(record)
     if _BACKGROUND.search(text):
         activity = [event for event in store.list_events(session_id, scope)
@@ -243,8 +271,12 @@ def topic_records(store, text: str, *, session_id: str, scope: str,
                   "本会话记录到的活动": f"{len(activity)} 次"}
         if activity:
             record["最近一次"] = _brief(activity[-1]["kind"] + " @ " + activity[-1]["created_at"], 120)
-        record["说明"] = ("没有记录的时间段不产生经历。不在运行或没有活动时如实说明，"
-                          "不要描述后台思考、观察或练习。")
+        # Every action, observation and consolidation she performs is written
+        # to this ledger, so within this session and scope an absent record is
+        # a known absence. Other sessions and scopes are out of view here.
+        record["说明"] = ("你做的动作、观察和整理都会记录下来；这里只列本会话、本场合的记录。"
+                          "本会话没有记录的活动就是没做过，不要描述后台思考、观察或练习；关机时什么也不经历。"
+                          "别的会话或场合的记录这里看不到，不替它们下结论。")
         records.append(record)
     if _PREFERENCE.search(text):
         stored = [memory for memory in store.memories(scope=scope)
@@ -256,7 +288,8 @@ def topic_records(store, text: str, *, session_id: str, scope: str,
             record["说明"] = "这些是有依据的长期偏好，可以直接说。其它想法属于此刻的反应，说清楚是当下的感觉。"
         else:
             record["说明"] = ("还没有保存过偏好。可以说明还在形成，或说这是此刻的感觉；"
-                              "不要临时编一个并说成一直以来的喜好。")
+                              "不要临时编一个并说成一直以来的喜好。"
+                              + ("这里只看得到公开保存的偏好，私下的记录这里看不到。" if scope == "public" else ""))
         records.append(record)
     return records
 

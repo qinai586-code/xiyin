@@ -375,7 +375,8 @@ class RuntimeV3Tests(unittest.IsolatedAsyncioTestCase):
         public = runtime.provider.calls[-1][0]["content"]
         # The inventory still grounds her; only the withheld agreement is gone.
         self.assertIn("与祈奈相关的记录", public)
-        self.assertIn("共同经历必须有记录", public)
+        self.assertIn("共同经历只能依据记录来说", public)
+        self.assertIn("这里查不到，不代表私下没有", public)
         self.assertNotIn("姐妹关系是身份约定", public)
         self.assertIn("姐妹关系是身份约定", await self.system(question))
         # The v2 arm keeps its tested records in every scope.

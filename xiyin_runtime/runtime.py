@@ -183,6 +183,7 @@ class XIYINRuntime(RuntimeServices):
                    for h in self.store.history(session_id, scope=scope, limit=self.settings.history_messages)]
         version = self.settings.persona_projection
         persona = self.persona.system_projection(growth, version=version, scope=scope)
+        facts = self.conversation_fact_projection(session_id, scope, register=version)
         # v3 keeps appearance out of the standing prompt and states it when
         # asked, and grounds "开机后知道过了多久" in the ledger's last utterance.
         disclosed = ((*self.continuity_facts(session_id, scope), *self.persona.disclosures(text))
@@ -191,7 +192,8 @@ class XIYINRuntime(RuntimeServices):
                 "public_identity": tuple(f.text for f in persona.fragments if f.source in SAYABLE_SOURCES),
                 "history": history,
                 "records": self._records(text, session_id, scope),
-                "facts": self.conversation_facts(session_id, scope, register=version),
+                "facts": facts.text,
+                "facts_projection": facts,
                 # Facts to be stated, not instructions: never in the protected set.
                 "public_facts": (*self.grounding_facts(session_id, scope), *disclosed),
                 "persona_projection": version,
@@ -298,7 +300,7 @@ class XIYINRuntime(RuntimeServices):
                 directive = "\n".join(filter(None, (directive, _CREATIVE_DIRECTIVE)))
             messages = self._compose(prepared, prompt, directive)
             protected = (prepared["protected_instructions"]
-                         + runtime_projection(prepared["facts"], directive).protected_instructions)
+                         + runtime_projection(prepared["facts_projection"], directive).protected_instructions)
             guard = OutputGuard(prompt, persona_prompt=messages[0]["content"],
                                 turn_directive=directive, protected_instructions=protected,
                                 policy=policy, public_identity=prepared["public_identity"])
@@ -421,6 +423,9 @@ class XIYINRuntime(RuntimeServices):
                             "released_chars": len(output), "generated_chars": len(raw_output),
                             "estimated_output_tokens": estimate_tokens(raw_output),
                             "provider_end": provider_end,
+                            # A reply that ended before its ceiling. A brief
+                            # reply cut off by its budget did not adapt.
+                            "ended_naturally": provider_end == "stop",
                             # Three separate instants. The gate buffers whole
                             # units, so released text lags the first token; and
                             # neither says anything about audio reaching a person.

@@ -28,6 +28,14 @@ Appearance and the feelings/consciousness stance are stated only when a turn ask
 
 **Persona projection v2.** `foundation.persona_projection = "v2"` projects the same seed for speech. It keeps identity, relationships, tendencies, motivations, the expression register of the current scope, and language. Presentation is stated as appearance and voice. Prohibitions are replaced by the positive frame voice agents use ("你的回复就是你说出口的话"). Per-turn scope stays in the runtime directive, and when TurnPolicy grants stage performance the directive says so. Relationship facts carry public provenance in every scope; v2 is kept unchanged as the B arm, so this differs from v3. `v1` is byte-identical to the tested projection, kept for A/B and rollback.
 
+**Runtime audit (2026-09-23).** See `docs/XIYIN_Runtime_Truth_Leakage_Length_Audit_2026-09-23.md`. Persona text is unchanged in every arm; four runtime defects shared by all arms were repaired:
+- **Provenance:** runtime facts are split at construction into sayable situation facts (`PUBLIC_RUNTIME_FACT`) and private rules. Before, "我现在只能打字交流和翻看记录…" was blocked as a prompt echo in every arm.
+- **Host paths:** absolute host paths in adapter exceptions are redacted before the prompt.
+- **Grounding:** records no longer turn an empty or out-of-scope inventory into "did not happen".
+- **Length:** the planner resolves the effective request (mentions, negation, corrections, ordered sections) and never claims the owner asked for detail on an inferred task.
+
+The harness now records full messages, raw chunks, released segments, plan receipts and model/build identity. It adds paired persona probes (P7, P8), a length-intent case (F10), absolute gates and a blinded review export. Capture success is not acceptance.
+
 **Release boundary.**
 - Provenance labels come from the persona constructor and the runtime, never from records or model text.
 - A released unit may not carry 12 consecutive normalized characters of the private-instruction corpus (8 when the user asks for the prompt). Runs that span a release boundary still stop the remainder. Public values are exempt. An unresolved hold at the end of the reply is released, not rejected.

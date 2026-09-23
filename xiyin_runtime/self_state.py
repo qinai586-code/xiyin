@@ -138,13 +138,16 @@ class SelfState:
             footing, caution = "动作结果有成有败", False
         attention = state.get("attention")
         focus = "当前这句话" if attention == "current_input" else (attention or "没有特别集中的事")
-        line = (f"当前功能状态：注意力在{focus}，语气{tone}，状态{energy}"
-                + (f"，{footing}。" if acted else "。") +
-                "这是运行中的计算状态，可以影响语气和先做什么；它不是主观体验，"
-                "也不需要逐项汇报，更不会自动变成长期性格。")
+        # The state values are hers to state if asked; the note after them
+        # is the runtime's instruction about how to use them.
+        line_fact = (f"当前功能状态：注意力在{focus}，语气{tone}，状态{energy}"
+                     + (f"，{footing}。" if acted else "。"))
+        line_note = ("这是运行中的计算状态，可以影响语气和先做什么；它不是主观体验，"
+                     "也不需要逐项汇报，更不会自动变成长期性格。")
         return {"activity": state.get("activity", "idle"), "attention": attention,
                 "tone": tone, "energy": energy, "footing": footing,
-                "caution": caution, "line": line,
+                "caution": caution, "line": line_fact + line_note,
+                "line_fact": line_fact, "line_note": line_note,
                 "interpretation": "bounded runtime appraisal, not evidence of subjective experience"}
 
     def observe(self, kind, payload, session_id="owner", scope="private"):

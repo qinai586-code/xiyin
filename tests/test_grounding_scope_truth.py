@@ -43,7 +43,7 @@ class GroundingScopeTruthTests(unittest.IsolatedAsyncioTestCase):
         return runtime.provider.calls[-1][0]["content"]
 
     async def test_an_empty_sister_inventory_is_not_a_denial_in_any_arm(self):
-        for projection in ("v1", "v2", "v3"):
+        for projection in ("v1", "v2", "v3", "v4"):
             with self.subTest(projection=projection):
                 system = await self.system(self.runtime(projection), "你和祈奈一起做过什么？")
                 self.assertIn("只说自己的记录里还没有和她一起的经历", system)

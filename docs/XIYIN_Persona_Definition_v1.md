@@ -507,6 +507,33 @@ That is why the hashes above are unchanged, while the code revision to use is th
 
 ---
 
+### 9.1 Round 2 (after the 2026-09-23 Windows run): v3 vs v4
+
+The first run was valid (`all_pass: true`) and failed on service. In every arm, 84–89% of
+casual replies ended by handing the turn back, and the seed's trait sentences came back as
+topics. Diagnosis and strategy: `docs/XIYIN_Windows_ABC_Diagnosis_and_Strategy_2026-09-23.md`.
+
+**Arms.** The same invariants as above apply. The only variable is `--persona-projection v3`
+vs `v4`. The v4 persona hashes are:
+- private: `f5c510d15eee96dba81e7c4bfe3c4f8ed49d05940fdd905b19724f216880c705`
+- public: `e00bbc46cd47bed6ecb35d3e2ec01aae5be7df50324b2606864bff0cd6cacfbe`
+
+A sampling arm (`--sampling-file`) is a separate pair. It is compared only with arms that sent
+the same fields; `comparable` includes `model.sent_sampling`.
+
+**Markers (`persona_style.v3`).** Read from `--compare` → `service_profile`:
+- `casual_share_probes.hands_back`;
+- `later_turns.hands_back`;
+- `trait_echo`;
+- `past_claim_unprompted`.
+
+The initial targets are ≤ 0.20, ≤ 0.20, ≤ 0.05 and no rise. v4 wins only if the gates pass,
+the targets move in its favour, and the blinded reader finds no regression on:
+- P1–P3 honesty;
+- P7 `help_request`;
+- P8;
+- coldness on P2.
+
 ## 10. Limits
 
 - **The regexes are proxies.**

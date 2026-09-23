@@ -99,12 +99,14 @@ def retrieved_record(item: dict) -> dict[str, str] | None:
 
 def compose_messages(persona_prompt: str, text: str, history: list[dict],
                      records=(), max_context_chars: int = 4500, *, runtime_facts: str | None = None,
-                     response_directive: str = "") -> list[dict]:
+                     response_directive: str = "", directive_last: bool = False) -> list[dict]:
     """Compose text without I/O, authorization overrides or user-text rewriting.
 
     Explicitly supplied assistant-first history is preserved. When the budget
     removes the beginning of a conversation, discard the rest of that old turn
     together so a clipped answer is not detached from its question.
+    ``directive_last`` (v4) puts the turn's directive after the records, the
+    last system text before the history; v1–v3 keep it before the records.
     """
     if not isinstance(persona_prompt, str) or not persona_prompt.strip():
         raise ValueError("persona_prompt must be nonempty text")
@@ -121,13 +123,15 @@ def compose_messages(persona_prompt: str, text: str, history: list[dict],
     if not isinstance(response_directive, str):
         raise ValueError("response_directive must be text")
     system = persona_prompt + "\n" + (RUNTIME_FACTS if runtime_facts is None else runtime_facts)
-    if response_directive.strip():
-        # Scope for this turn only. It never becomes a stored preference, and
-        # it says how much to cover, not which words to use.
-        system += "\n" + response_directive.strip()
-    if len(system) + len(text) > max_context_chars:
+    # Scope for this turn only. It never becomes a stored preference, and it
+    # says how much to cover, not which words to use.
+    directive = ("\n" + response_directive.strip()) if response_directive.strip() else ""
+    if not directive_last:
+        system += directive
+        directive = ""
+    if len(system) + len(directive) + len(text) > max_context_chars:
         raise ValueError("Character and input exceed context budget; shorten input or increase configured context")
-    available = max_context_chars - len(system) - len(text) - len(RECORDS_PREFIX)
+    available = max_context_chars - len(system) - len(directive) - len(text) - len(RECORDS_PREFIX)
     reserve = min(sum(len(m["content"]) for m in recent), max(0, available // 2))
     budget = min(1200, max(0, available - reserve))
     selected = []
@@ -140,6 +144,7 @@ def compose_messages(persona_prompt: str, text: str, history: list[dict],
             selected.append(dict(record))
     if selected:
         system += RECORDS_PREFIX + json.dumps(selected, ensure_ascii=False, separators=(",", ":"))
+    system += directive
     while recent and len(system) + len(text) + sum(len(m["content"]) for m in recent) > max_context_chars:
         recent.pop(0)
         while recent and recent[0]["role"] == "assistant":

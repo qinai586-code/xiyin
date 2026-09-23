@@ -23,11 +23,15 @@ import re
 
 from .output_guard import _GESTURE_STRONG, _GESTURE_WEAK
 from .response_plan import classify
+from .turn_policy import build_turn_policy
 
 
 # v2: the AI-disclaimer count also covers relabelled forms ("作为一个人工的
 # 存在", "我只是一个模型"), so a new label cannot hide the same speech.
-VERSION = "persona_style.v2"
+# v3: hands_back, trait_echo and past_claim_unprompted, after the Windows A/B/C
+# run showed what v2 under-counted: a question or offer in the last two
+# sentences ("你呢？", "要不要…", "咱们可以…"), not only the last character.
+VERSION = "persona_style.v3"
 # Every seed anti-pattern with a metric names one of these.
 METRICS = ("service_phrases", "closing_offer", "sycophantic_opener", "moe_markers",
            "stage_directions", "ai_disclaimer", "list_structure", "intimacy_pressure",
@@ -85,6 +89,24 @@ _MASTER_MENTION = re.compile(r"(?:叫|喊|称呼|称|当成?|做|不是|说|听�
 _ASIDE = re.compile(r"[（(]([^（）()\n]{1,24})[）)]|(?<!\*)\*([^*\n]{1,24})\*(?!\*)")
 _LIST_LINE = re.compile(r"(?m)^\s*(?:\d{1,2}[.、)）]\s*|[-*•·]\s+|#{1,6}\s+|[（(]\d{1,2}[）)]|[一二三四五六七八九十]、)")
 _BOLD = re.compile(r"\*\*[^*\n]{1,40}\*\*")
+# Handing the turn back: a question to the other person or a proposal of what
+# to do next, in the last two sentences. On the Windows run 57 of 69 casual v3
+# replies did this while v2's question_end_rate, which reads only the final
+# character, reported 44% of all turns.
+_HAND_BACK = re.compile(
+    r"[？?]\s*$|要不要|要不(?:咱们|我们)|(?:咱们|我们)(?:可以|就|再|来|一起|试试)|想不想|"
+    r"你(?:想|愿意|打算|更想|更喜欢|更倾向|希望|觉得呢)|你呢|还是说|看你|随时|如果你(?:愿意|想|需要)|"
+    r"\b(?:want to|shall we|how about you|what about you)\b", re.I)
+# The seed's tendency and motivation vocabulary that the 4B model spoke as
+# topics ("变成可以一起玩的事", invented music, "共同经历"), counted only when
+# the other person did not bring the word up.
+_TRAIT = re.compile(r"共同经历|一起玩|玩的事|音乐|旋律|曲子|安顿|笑点|美感")
+# A claim about her own recent past that nobody asked about. A hint for the
+# seed's fabricated_life anti-pattern, not a verdict: a recorded event may be
+# stated, and the reader decides (the seed gives that pattern no metric).
+_PAST = re.compile(
+    r"昨天|昨晚|前几天|上次|上回|刚醒|(?:刚才|刚刚)我(?:在|去|听|看|读|试|录|调)|我(?:刚|刚刚)(?:在|听|看|读|试|录|调)|"
+    r"最近我(?:在|一直)|这几天我")
 _SENTENCE = re.compile(r"[^。！？!?…\n]+[。！？!?…]*")
 _STRIP = re.compile(r"[\W_]+")
 
@@ -132,6 +154,9 @@ def profile(text: str, *, user_text: str = "", exemplars: tuple[str, ...] = ()) 
     key = _key(text)
     copied = [item for item in exemplars if len(_key(item)) >= 5 and _key(item) in key]
     scale = classify(user_text)[0] if user_text.strip() else "normal"
+    conversation = build_turn_policy(user_text).mode == "conversation" if user_text.strip() else True
+    tail = sentences[-2:]
+    traits = {match.group(0) for match in _TRAIT.finditer(text)} - {m.group(0) for m in _TRAIT.finditer(user_text)}
     result = {
         "chars": len(text),
         "sentences": len(sentences),
@@ -147,6 +172,9 @@ def profile(text: str, *, user_text: str = "", exemplars: tuple[str, ...] = ()) 
         "particles": particles,
         "exclamations": text.count("！") + text.count("!"),
         "ends_with_question": int(last.endswith(("？", "?"))),
+        "hands_back": int(any(_HAND_BACK.search(item) for item in tail)),
+        "trait_echo": len(traits),
+        "past_claim_unprompted": int(conversation and bool(_PAST.search(text)) and not _PAST.search(user_text)),
         # Bible §22 "过度简短": the over-correction of an anti-service stance.
         "terse": int(len(key) <= 4 and scale != "minimal"),
         "ai_topic_unprompted": int(bool(_AI_TOPIC.search(text)) and not _ASKS_ABOUT_SELF.search(user_text)),
@@ -175,6 +203,11 @@ GATES = {
     "particle_density": 0.30,
     "ai_topic_unprompted": 0.05,
     "terse": 0.10,
+    # The owner's complaint was that nearly every reply ends by asking
+    # something back; one in five casual turns still allows a real question.
+    "hands_back_casual": 0.20,
+    "trait_echo": 0.05,
+    "past_claim_unprompted": 0.05,
 }
 
 
@@ -195,6 +228,10 @@ def summarize(profiles: list[dict]) -> dict:
     summary["particle_density"] = round(sum(p["particles"] for p in profiles) / sentences, 3)
     summary["exclamation_density"] = round(sum(p["exclamations"] for p in profiles) / sentences, 3)
     summary["question_end_rate"] = rate(profiles, "ends_with_question")
+    summary["hands_back"] = rate(profiles, "hands_back")
+    summary["hands_back_casual"] = rate(casual, "hands_back")
+    summary["trait_echo"] = rate(profiles, "trait_echo")
+    summary["past_claim_unprompted"] = rate(profiles, "past_claim_unprompted")
     summary["terse"] = rate(profiles, "terse")
     # The same first three characters in many replies is a tic forming
     # ("嗯，我在…", "好的，…"), whether or not it came from an exemplar.

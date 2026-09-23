@@ -9,7 +9,7 @@ import httpx
 
 from xiyin_runtime.provider import (
     MAX_EVENT_BYTES, LocalModelClient, ProviderCancelled, ProviderConfig, ProviderError,
-    ProviderTruncated,
+    ProviderTruncated, sampling_pairs,
 )
 
 
@@ -63,9 +63,20 @@ class ConfigTests(unittest.TestCase):
             {"timeout_seconds": float("inf")}, {"timeout_seconds": True},
             {"max_tokens": 0}, {"max_tokens": 1.5}, {"max_tokens": True},
             {"enable_thinking": "false"},
+            {"sampling": {"temperature": 0.7}}, {"sampling": (("temperature", 3.0),)},
+            {"sampling": (("top_k", 20.5),)}, {"sampling": (("seed", 1),)},
+            {"sampling": (("top_p", 0.8), ("top_p", 0.9))}, {"sampling": (("min_p", float("nan")),)},
+            {"sampling": (("temperature", True),)},
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ProviderError):
                 ProviderConfig("http://localhost", "xiyin", **kwargs)
+
+    def test_sampling_pairs_are_sorted_and_checked(self):
+        self.assertEqual(sampling_pairs({"top_p": 0.8, "temperature": 0.7, "top_k": 20}),
+                         (("temperature", 0.7), ("top_k", 20), ("top_p", 0.8)))
+        self.assertEqual(sampling_pairs({}), ())
+        with self.assertRaises(ProviderError):
+            sampling_pairs({"temperature": "0.7"})
 
 
 class ProviderTests(unittest.IsolatedAsyncioTestCase):
@@ -113,6 +124,16 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         result = await self.collect(self.client_for(stream))
         self.assertEqual(result, ["你好", "！"])
         self.assertTrue(stream.closed)
+
+    async def test_sampling_is_sent_only_when_chosen(self):
+        stream = ByteStream([event({"content": "嗯"}), DONE])
+        config = ProviderConfig("http://localhost", "xiyin",
+                                sampling=sampling_pairs({"temperature": 0.7, "top_k": 20, "presence_penalty": 1.5}))
+        await self.collect(self.client_for(stream, config=config))
+        body = json.loads(self.requests[0].content)
+        self.assertEqual({key: body[key] for key in ("temperature", "top_k", "presence_penalty")},
+                         {"temperature": 0.7, "top_k": 20, "presence_penalty": 1.5})
+        self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
 
     async def test_thinking_option_is_forwarded_but_reasoning_is_not(self):
         stream = ByteStream([event({"reasoning_content": "secret", "content": "answer"}), DONE])

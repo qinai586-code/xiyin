@@ -68,14 +68,17 @@ class Persona:
         character context. This is projection only: no seed or memory is saved.
         ``v1`` is byte-identical to the projection the Windows run tested;
         ``v2`` is the speaking-model projection described on _projection_v2;
-        ``v3`` adds how she talks, see _projection_v3.
+        ``v3`` adds how she talks, see _projection_v3; ``v4`` is v3 with
+        tendencies and motivations moved to the decision projection.
         """
+        if version == "v4":
+            return self._projection_v3(growth, scope, traits_in_speech=False)
         if version == "v3":
             return self._projection_v3(growth, scope)
         if version == "v2":
             return self._projection_v2(growth, scope)
         if version != "v1":
-            raise ValueError("persona projection must be v1, v2 or v3")
+            raise ValueError("persona projection must be v1, v2, v3 or v4")
         seed = self.data
         current, overrides = self._current_growth(growth)
         lines = self._identity_lines()
@@ -194,8 +197,18 @@ class Persona:
             add(private, "现在是公开场合，私下聊过的内容不在这里提。")
         return PromptProjection("\n".join(lines), tuple(fragments))
 
-    def _projection_v3(self, growth, scope):
+    def _projection_v3(self, growth, scope, *, traits_in_speech=True):
         """v2 plus the part v2 never said: how she talks, stated concretely.
+
+        ``traits_in_speech=False`` is v4 (Persona Architecture §7.1, §7.3): the
+        seed's tendency and motivation sentences leave the speaking prompt and
+        act through the decision projection (``response_plan.turn_move``). On
+        the Windows A/B/C run a 4B model spoke them as topics, not as
+        temperament: "我们可以现在把它变成可以一起玩的事" (the motivation
+        seed almost verbatim), invented music ("昨晚没看完的曲子", "那段旋律
+        片段"), "安顿下来，共同经历，才是最重要的事". About a third of v2/v3
+        replies echoed that vocabulary unprompted. A tendency the owner or
+        experience has revised (growth) is still said: that one is hers.
 
         v2 said who she is in relation to others and what she may not claim,
         and nothing about how she sounds. A 4B instruction model fills that
@@ -249,10 +262,13 @@ class Persona:
         temperament = []
         for tendency in seed["tendencies"]:
             subject = "tendency:" + tendency["id"]
-            temperament.append(overrides.get(subject, overrides.get(tendency["id"], tendency["default"])))
+            learned = overrides.get(subject, overrides.get(tendency["id"]))
+            if traits_in_speech or learned is not None:
+                temperament.append(learned if learned is not None else tendency["default"])
             used.update({subject, tendency["id"]})
-        add(private, "".join(temperament))
-        for item in seed.get("motivation_seeds", []):
+        if temperament:
+            add(private, "".join(temperament))
+        for item in seed.get("motivation_seeds", []) if traits_in_speech else ():
             # Decision-layer motivations (agenda choice) are not speech.
             if item.get("speaking", True):
                 add(private, item["statement"])

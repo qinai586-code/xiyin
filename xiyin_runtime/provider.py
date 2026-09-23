@@ -97,6 +97,37 @@ class GenerationBudget:
             raise ProviderError("budget timeout_seconds must be finite and positive")
 
 
+# OpenAI-compatible fields plus llama.cpp's extensions, with sane bounds.
+SAMPLING_FIELDS = {
+    "temperature": (0.0, 2.0), "top_p": (0.0, 1.0), "top_k": (0, 1000), "min_p": (0.0, 1.0),
+    "presence_penalty": (-2.0, 2.0), "frequency_penalty": (-2.0, 2.0), "repeat_penalty": (0.5, 2.0),
+}
+
+
+def _check_sampling(sampling) -> None:
+    if not isinstance(sampling, tuple):
+        raise ProviderError("sampling must be a tuple of (name, value) pairs")
+    names = set()
+    for item in sampling:
+        if not isinstance(item, tuple) or len(item) != 2 or item[0] not in SAMPLING_FIELDS or item[0] in names:
+            raise ProviderError("sampling names must be unique and one of: " + ", ".join(sorted(SAMPLING_FIELDS)))
+        name, value = item
+        names.add(name)
+        low, high = SAMPLING_FIELDS[name]
+        if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+                or not low <= value <= high or (name == "top_k" and type(value) is not int)):
+            raise ProviderError(f"sampling {name} must be a number from {low} to {high}")
+
+
+def sampling_pairs(values: dict) -> tuple[tuple[str, float], ...]:
+    """A validated, ordered tuple from a mapping (config table or JSON file)."""
+    if not isinstance(values, dict):
+        raise ProviderError("sampling must be a table of names to numbers")
+    pairs = tuple(sorted(values.items()))
+    _check_sampling(pairs)
+    return pairs
+
+
 @dataclass(frozen=True)
 class ProviderConfig:
     endpoint: str
@@ -108,9 +139,15 @@ class ProviderConfig:
     max_timeout_seconds: float = 600
     context_tokens: int = 4096
     default_tokens_per_second: float = 8.0
+    # Sampling fields sent with every request, as (name, value) pairs. Empty
+    # means none are sent and the server's own defaults decide, which is what
+    # every recorded run so far used. Setting them is an owner decision and a
+    # separate experimental arm, never a fix for a persona result.
+    sampling: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
         _urls(self.endpoint)
+        _check_sampling(self.sampling)
         if not isinstance(self.model, str) or not self.model.strip():
             raise ProviderError("model must be a non-empty string")
         if isinstance(self.timeout_seconds, bool) or not isinstance(self.timeout_seconds, (int, float)) or not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
@@ -316,6 +353,7 @@ class LocalModelClient:
             "model": self.config.model, "messages": messages,
             "max_tokens": max_tokens, "stream": True,
             "chat_template_kwargs": {"enable_thinking": self.config.enable_thinking},
+            **dict(self.config.sampling),
         }
         deadline = time.monotonic() + timeout_seconds
         try:

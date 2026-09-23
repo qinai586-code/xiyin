@@ -6,6 +6,7 @@ heard it. A later Body must supply separate playback receipts.
 
 import asyncio
 from contextlib import aclosing
+import dataclasses
 from dataclasses import dataclass
 import hashlib
 import inspect
@@ -30,7 +31,8 @@ from .output_guard import OutputGuard, OutputBlocked, VERSION as OUTPUT_GUARD_VE
 from .provider import GenerationBudget, LocalModelClient, ProviderCancelled, ProviderTruncated
 from .persona_style import profile as style_profile
 from .prompt_provenance import SAYABLE_SOURCES, runtime_projection
-from .response_plan import ResponsePlan, estimate_tokens, plan_response, updated_rate
+from .response_plan import (ResponsePlan, estimate_tokens, move_directive, plan_response, turn_move,
+                            updated_rate)
 from .turn_policy import build_turn_policy
 
 
@@ -159,8 +161,9 @@ class XIYINRuntime(RuntimeServices):
             records.append(memory_receipt_record(item))
             if len(seen_memories) >= 2:
                 break
-        # v1/v2 keep their tested records; v3 withholds what its prompt withholds.
-        sister = (self.settings.persona_projection != "v3"
+        # v1/v2 keep their tested records; v3 (and v4, built on it) withholds
+        # what its prompt withholds.
+        sister = (self.settings.persona_projection not in {"v3", "v4"}
                   or self.persona.relationship_sayable("qinai_relationship", scope))
         records.extend(topic_records(self.store, text, session_id=session_id, scope=scope,
                                      relationship_sayable=sister))
@@ -182,12 +185,14 @@ class XIYINRuntime(RuntimeServices):
         history = [{"role": h["role"], "content": h["content"]}
                    for h in self.store.history(session_id, scope=scope, limit=self.settings.history_messages)]
         version = self.settings.persona_projection
+        # v4 differs from v3 only in the persona slice and the turn's move.
+        register = "v3" if version == "v4" else version
         persona = self.persona.system_projection(growth, version=version, scope=scope)
-        facts = self.conversation_fact_projection(session_id, scope, register=version)
+        facts = self.conversation_fact_projection(session_id, scope, register=register)
         # v3 keeps appearance out of the standing prompt and states it when
         # asked, and grounds "开机后知道过了多久" in the ledger's last utterance.
         disclosed = ((*self.continuity_facts(session_id, scope), *self.persona.disclosures(text))
-                     if version == "v3" else ())
+                     if register == "v3" else ())
         return {"persona": persona.text, "protected_instructions": persona.protected_instructions,
                 "public_identity": tuple(f.text for f in persona.fragments if f.source in SAYABLE_SOURCES),
                 "history": history,
@@ -204,7 +209,8 @@ class XIYINRuntime(RuntimeServices):
         return compose_messages(prepared["persona"], text, prepared["history"], prepared["records"],
                                 self.settings.max_context_chars,
                                 runtime_facts=facts,
-                                response_directive=response_directive)
+                                response_directive=response_directive,
+                                directive_last=prepared.get("persona_projection") == "v4")
 
     def _messages(self, text: str, session_id: str, scope: str,
                   *, response_directive: str = "") -> list[dict]:
@@ -294,10 +300,16 @@ class XIYINRuntime(RuntimeServices):
             plan = self._plan_turn(prompt, self._compose(prepared, prompt), session_id, scope)
             policy = build_turn_policy(prompt)
             directive = plan.directive
-            if self.settings.persona_projection in {"v2", "v3"} and policy.allow_stage_performance:
-                # The one policy the model must know to comply: v2 and v3 carry
+            if self.settings.persona_projection in {"v2", "v3", "v4"} and policy.allow_stage_performance:
+                # The one policy the model must know to comply: v2–v4 carry
                 # no standing rule about actions, so say it per turn.
                 directive = "\n".join(filter(None, (directive, _CREATIVE_DIRECTIVE)))
+            if self.settings.persona_projection == "v4":
+                # The decision projection: this turn's move, from the owner's
+                # words, as the last system line (response_plan.turn_move).
+                move = turn_move(prompt, mode=policy.mode, scale=plan.scale, reason=plan.reason)
+                plan = dataclasses.replace(plan, move=move)
+                directive = "\n".join(filter(None, (directive, move_directive(move))))
             messages = self._compose(prepared, prompt, directive)
             protected = (prepared["protected_instructions"]
                          + runtime_projection(prepared["facts_projection"], directive).protected_instructions)

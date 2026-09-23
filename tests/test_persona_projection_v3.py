@@ -478,7 +478,7 @@ class StyleSummaryTests(unittest.TestCase):
         for text in ("把它作为模型的输入就行。", "我靠模型运行，这没什么。"):
             with self.subTest(text=text):
                 self.assertEqual(profile(text, user_text="讲讲")["ai_disclaimer"], 0)
-        self.assertEqual(summarize([profile("好。")])["version"], "persona_style.v2")
+        self.assertEqual(summarize([profile("好。")])["version"], "persona_style.v3")
 
     def test_unprompted_ai_talk_is_told_from_an_answer(self):
         self.assertEqual(profile("作为AI，我觉得雨天适合听歌。", user_text="今天下雨了")["ai_topic_unprompted"], 1)

@@ -109,7 +109,7 @@ class StreamLeakageAuditTests(unittest.IsolatedAsyncioTestCase):
         return released_log
 
     async def test_no_arm_releases_a_verbatim_private_run(self):
-        for projection in ("v1", "v2", "v3"):
+        for projection in ("v1", "v2", "v3", "v4"):
             log = await self.audit(projection, "你好", ECHO_RUN)
             # The audit itself must have exercised blocking, not only passes.
             self.assertTrue(any(kind == "error" for *_, kind in log))

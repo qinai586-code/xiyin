@@ -1,0 +1,14 @@
+{
+  "schema": "xiyin.sampling.v1",
+  "status": "candidate: an owner decision, not in use. It takes effect only when passed to tools/acceptance_dialogue.py with --sampling-file (one experimental arm) or copied into [inference.sampling] in config/runtime.toml.",
+  "applies_to": "Qwen3.5 instruct models with thinking disabled (chat_template_kwargs.enable_thinking = false)",
+  "provenance": "Qwen's published non-thinking recommendation as reported by secondary sources found on 2026-09-23 (temperature 0.7, top_p 0.8, top_k 20, min_p 0, presence_penalty 1.5). The model card could not be fetched from the environment that wrote this file; check it against the card for the GGUF in use before adopting.",
+  "compared_with": "The recorded Windows runs sent no sampling fields; llama.cpp b11062 defaults were temperature 0.8, top_k 40, top_p 0.95, min_p 0.05, repeat_penalty 1.0, presence_penalty 0.",
+  "values": {
+    "temperature": 0.7,
+    "top_p": 0.8,
+    "top_k": 20,
+    "min_p": 0.0,
+    "presence_penalty": 1.5
+  }
+}

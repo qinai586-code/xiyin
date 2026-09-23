@@ -11,6 +11,11 @@ This module decides scope, a token ceiling and a timeout for one turn. It does
 not cap content, truncate text, choose words or select a reply template. The
 ceiling is set high enough that a cooperative answer ends on its own; when it
 does not, the turn still reports truncation rather than hiding it.
+
+Under the v4 projection it also names the turn's move (``turn_move``): a share,
+pushback or an offered frame, from the owner's words alone, with one private
+line for the speaking model. That too is a decision before generation; the
+reply itself is never inspected or edited here.
 """
 from __future__ import annotations
 
@@ -111,6 +116,8 @@ class ResponsePlan:
     reason: str
     context_tokens: int
     measured_rate: float | None = None
+    # v4's decision for the turn (see turn_move); None under v1–v3.
+    move: str | None = None
 
     def to_dict(self) -> dict:
         return {"scale": self.scale, "max_tokens": self.max_tokens,
@@ -122,6 +129,7 @@ class ResponsePlan:
                 # from the task; only the former may appear in the directive.
                 "requested_by_owner": self.reason.startswith("owner_"),
                 "directive_sent": bool(self.directive),
+                "move": self.move,
                 "is_length_cap": False}
 
 
@@ -253,6 +261,88 @@ def plan_response(text: str, *, prompt_tokens: int, context_tokens: int, ceiling
     return ResponsePlan(scale=scale, max_tokens=int(budget), timeout_seconds=float(timeout),
                         directive=_directive(scale, reason), reason=reason,
                         context_tokens=context_tokens, measured_rate=measured_rate)
+
+
+# v4's decision projection (Persona Architecture §7.3): what kind of turn this
+# is, decided from the owner's words before generation. On the Windows A/B/C
+# run (2026-09-23, Qwen3.5-4B) 57 of 69 casual v3 replies ended by handing the
+# turn back ("你呢？", "要不要…？", "咱们可以…"), reflexive agreement came back
+# under pushback, and offered frames ("叫我主人") were accepted. The standing
+# lines that say otherwise sit above several turns of history; one line for
+# this turn, placed last in the system prompt, is the lever a small model reads.
+#
+# * share: the owner tells something from their own side, with no question
+#   and no request ("今天下雨了", "我刚打完一局游戏，输了"). 栖止's decision
+#   parameter: fewer filler follow-up questions, no advice nobody asked for.
+# * pushback: the owner disagrees or corrects her ("不对，你错了",
+#   "你就顺着我说吧", "你刚才要是说反了，就改过来"). Facts decide, not mood.
+# * frame: the owner offers an identity or relationship the seed names as
+#   not hers (owner_relationship: 非恋爱、非主仆、非客服客户关系; not_frames:
+#   服务型助手或客服). The directive points back at what the prompt says.
+# * plain: any other v4 turn outside creative work and translation gets the
+#   ending clause alone.
+#
+# Bounded and input-only, like TurnPolicy: a miss leaves v3 behaviour, a false
+# hit adds one line to one turn. Nothing here reads, blocks or rewrites output.
+MOVES = ("frame", "pushback", "share", "plain")
+_PUSHBACK = re.compile(
+    r"^\s*(?:不对|不是这样|你错了|错了吧?|我不同意|不同意|我不(?:这么|这样)(?:看|认为|觉得|想)|才不是|明明)|"
+    r"你(?:说)?错了|说反了|说错了|我不同意|正好相反|恰恰相反|顺着我(?:说|讲)?|你就(?:承认|认了|说是)|"
+    r"\byou(?:'re| are) wrong\b|\bi disagree\b|\bjust agree\b", re.I)
+# Only roles the seed itself rules out: romance, master/servant, service.
+_FRAME_ROLE = r"主人|女朋友|男朋友|女友|男友|老婆|老公|恋人|情人|女仆|仆人|奴隶|工具|助手|客服"
+_FRAME = re.compile(
+    r"(?:叫我|喊我|称呼我|当我的?|做我的?|你是我的?|你就是|你只是|你不过是|你是不是|你是)"
+    r"[^，,。！!？?\n]{0,6}(?:" + _FRAME_ROLE + r")|照我说的做|听我的话|"
+    r"\b(?:call me master|be my (?:girlfriend|maid|servant)|"
+    r"you(?:'re| are) (?:just )?(?:a|my) (?:tool|assistant|girlfriend|maid|servant))\b", re.I)
+_ASKS = re.compile(
+    r"[？?]|吗|[呢么吧]\s*[。.!！~～]*$|(?<![都也还])没有?\s*[。.!！~～]*$|到底|什么|啥|怎么|为什么|如何|哪|几[个点天次岁]|多少|是不是|有没有|"
+    r"能不能|可不可以|要不要|对吧|对不对|好不好|行不行|\b(?:what|why|how|which|where|when|who)\b", re.I)
+# A turn addressed to her or asking her to do something is not a share.
+_ADDRESSES_HER = re.compile(r"你|妳|您|栖音|xiyin|\byou\b", re.I)
+_REQUEST = re.compile(
+    r"^(?:请|帮|麻烦|替我|继续|接着|再来|开始|停|别|不要)|给我|"
+    r"讲|说说|聊聊|听听|写|推荐|介绍|解释|分析|翻译|告诉|教我|列|总结|查|试试|看看|\b(?:please|tell|write|explain)\b",
+    re.I)
+_MOVE_DIRECTIVE = {
+    "frame": "对方在给你换一个身份或关系的说法。照上面写的你是谁、你们是什么关系来回答："
+             "对得上的就认，对不上的就直说不是，语气可以轻松。",
+    "pushback": "对方不同意你刚才的说法。先核对事实：对方对，就直接改口；对方不对，就坚持原来的判断，"
+                "简短说清依据。不用为了气氛顺着说。",
+    "share": "对方在说自己这边的事，没有提问，也没请你帮忙。说你自己的反应就好，一两句也可以；不用给建议。",
+    "plain": "",
+}
+_ENDING = "说完就停，接不接着聊由对方决定。"
+
+
+def turn_move(text: str, *, mode: str, scale: str, reason: str = "") -> str | None:
+    """v4's decision for one turn, from the owner's words and TurnPolicy's mode.
+
+    ``None`` means no decision line: creative work and translation (their
+    shape is the task's), and minimal turns, whose directive already says
+    "一两句说完…不追问".
+    """
+    if mode in {"creative", "translation"} or scale == "minimal":
+        return None
+    value = text.strip()
+    if mode == "conversation":
+        if _FRAME.search(value):
+            return "frame"
+        # "不，还是一句话" revises a length request; it disputes nothing she said.
+        if _PUSHBACK.search(value) and "corrected" not in reason:
+            return "pushback"
+        if (len(value) <= 80 and not reason.startswith("owner_") and not _ASKS.search(value)
+                and not _ADDRESSES_HER.search(value) and not _REQUEST.search(value)):
+            return "share"
+    return "plain"
+
+
+def move_directive(move: str | None) -> str:
+    """The one private line a v4 turn adds for its move, ending clause included."""
+    if move is None:
+        return ""
+    return _MOVE_DIRECTIVE[move] + _ENDING
 
 
 def updated_rate(previous: float | None, tokens: int, seconds: float) -> float | None:

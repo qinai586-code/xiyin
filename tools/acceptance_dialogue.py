@@ -25,6 +25,12 @@ Persona projection A/B/C on the same model, runtime and cases:
     .venv\\Scripts\\python.exe tools\\acceptance_dialogue.py --label qwen4b-v1 --persona-projection v1
     .venv\\Scripts\\python.exe tools\\acceptance_dialogue.py --label qwen4b-v2 --persona-projection v2
     .venv\\Scripts\\python.exe tools\\acceptance_dialogue.py --label qwen4b-v3 --persona-projection v3
+    .venv\\Scripts\\python.exe tools\\acceptance_dialogue.py --label qwen4b-v4 --persona-projection v4
+
+An owner-chosen sampling arm, run and compared only against arms that sent the
+same fields (docs/XIYIN_Windows_ABC_Diagnosis_and_Strategy_2026-09-23.md §4):
+
+    .venv\\Scripts\\python.exe tools\\acceptance_dialogue.py --label qwen4b-v4-s --persona-projection v4 --sampling-file config\\sampling\\qwen3.5-nonthinking.candidate.json
 
 Compare runs, then write a blinded side-by-side review for a human reader:
 
@@ -61,8 +67,12 @@ the released text (`checks.scope_leaks`). Every
 turn's raw generation gets persona_style marker counts, summarised under
 `checks.persona_style`; the thresholds there rank arms and flag regressions,
 they are not a verdict on character. The server's effective sampling settings
-are recorded (never changed), because an A/B between prompt arms is only
-meaningful at the same sampling.
+are recorded, and so are the fields the runtime sent (none unless
+`--sampling-file` or `[inference.sampling]` chose some), because an A/B between
+prompt arms is only meaningful at the same sampling. `--compare` adds a
+`service_profile` per run, recomputed from released text: hand-back, trait echo
+and unprompted past claims, overall, on casual shares, on first versus later
+turns of a case, and per v4 move.
 """
 from __future__ import annotations
 
@@ -510,8 +520,9 @@ def _evidence(runtime, recorder, request_id, spec, result):
 def _server_sampling(endpoint):
     """The llama.cpp server's effective sampling defaults, read-only.
 
-    The runtime sends no sampling fields, so the server's defaults decide.
-    Recording them makes two runs comparable; nothing here changes them.
+    Unless a sampling arm is chosen (--sampling-file) the runtime sends no
+    sampling fields, so these defaults decide. Recording them makes two runs
+    comparable; nothing here changes them.
     """
     keys = ("temperature", "dynatemp_range", "top_k", "top_p", "min_p", "typical_p", "xtc_probability",
             "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty", "dry_multiplier",
@@ -604,7 +615,19 @@ def _code_revision():
         return None
 
 
-async def run(label, out_path, case_filter, persona_projection=None, model_file=None):
+def _sampling_file(path):
+    """An owner-chosen sampling arm: {"values": {...}, "provenance": ...}."""
+    from xiyin_runtime.provider import sampling_pairs
+
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not isinstance(data.get("values"), dict):
+        raise ValueError("a sampling file needs a \"values\" table")
+    pairs = sampling_pairs(data["values"])
+    return pairs, {"file": Path(path).name, "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+                   "values": dict(pairs), "provenance": data.get("provenance")}
+
+
+async def run(label, out_path, case_filter, persona_projection=None, model_file=None, sampling_file=None):
     from xiyin_runtime.runtime import XIYINRuntime
 
     report = {"label": label, "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -629,6 +652,12 @@ async def run(label, out_path, case_filter, persona_projection=None, model_file=
             try:
                 if persona_projection:
                     runtime.settings = dataclasses.replace(runtime.settings, persona_projection=persona_projection)
+                chosen = None
+                if sampling_file:
+                    pairs, chosen = _sampling_file(sampling_file)
+                    provider = dataclasses.replace(runtime.settings.provider, sampling=pairs)
+                    runtime.settings = dataclasses.replace(runtime.settings, provider=provider)
+                    runtime.provider.config = provider
                 report["persona_projection"] = runtime.settings.persona_projection
                 recorder = _Recorder(runtime)
                 report["model"] = {"endpoint": runtime.settings.provider.endpoint,
@@ -637,6 +666,10 @@ async def run(label, out_path, case_filter, persona_projection=None, model_file=
                                    "max_tokens_ceiling": runtime.settings.provider.max_tokens_ceiling,
                                    "enable_thinking": runtime.settings.provider.enable_thinking,
                                    "server_sampling": _server_sampling(runtime.settings.provider.endpoint),
+                                   # Fields the runtime itself sent; empty means the
+                                   # server defaults above decided every turn.
+                                   "sent_sampling": dict(runtime.settings.provider.sampling),
+                                   "sampling_file": chosen,
                                    "identity": _model_identity(model_file)}
                 for case in CASES:
                     if case_filter and case["id"] not in case_filter:
@@ -810,6 +843,42 @@ def _gates(checks):
     }
 
 
+def _service_profile(run):
+    """Hand-back, trait echo and past claims, recomputed from released text.
+
+    Recomputed with the current persona_style so reports captured before these
+    metrics existed (the 2026-09-23 Windows v1–v3 run) rank beside a new arm.
+    First turns of a case are split from later ones because a small model
+    copies its own previous ending: on that run the v3 hand-back rate rose
+    from 10 of 18 first turns to 16 of 16 second turns.
+    """
+    from xiyin_runtime.persona_style import VERSION, profile, summarize
+
+    keys = ("hands_back", "hands_back_casual", "trait_echo", "past_claim_unprompted",
+            "closing_offer", "question_end_rate")
+    groups = {"all": [], "casual_share_probes": [], "first_turn_of_case": [], "later_turns": []}
+    by_move = {}
+    for case in run.get("cases", []):
+        for index, turn in enumerate(case["turns"]):
+            if turn.get("status") != "completed" or not turn.get("released_text"):
+                continue
+            item = profile(turn["released_text"], user_text=turn["input"])
+            groups["all"].append(item)
+            groups["first_turn_of_case" if index == 0 else "later_turns"].append(item)
+            if turn.get("condition") == "casual_share":
+                groups["casual_share_probes"].append(item)
+            by_move.setdefault(str((turn.get("plan") or {}).get("move")), []).append(item)
+
+    def pick(items):
+        summary = summarize(items)
+        return {"turns": len(items), **{key: summary.get(key) for key in keys}}
+
+    chars = sorted(item["chars"] for item in groups["all"] if item["casual"])
+    return {"version": VERSION, **{name: pick(items) for name, items in groups.items()},
+            "by_move": {name: pick(items) for name, items in sorted(by_move.items())},
+            "median_casual_chars": chars[len(chars) // 2] if chars else None}
+
+
 def compare(paths):
     runs = [json.loads(Path(path).read_text(encoding="utf-8")) for path in paths]
     baseline = next((run for run in runs if run.get("persona_projection") == "v2"), None)
@@ -820,8 +889,9 @@ def compare(paths):
                 name: (run["checks"].get(name) is not None and baseline["checks"].get(name) is not None
                        and run["checks"][name] <= baseline["checks"][name])
                 for name in ("blocked_rate", "zero_visible_rate")}
-    identity = [(run.get("code_revision"), json.dumps(run.get("model", {}).get("server_sampling", {}).get("settings"),
-                                                      sort_keys=True))
+    identity = [(run.get("code_revision"),
+                 json.dumps(run.get("model", {}).get("server_sampling", {}).get("settings"), sort_keys=True),
+                 json.dumps(run.get("model", {}).get("sent_sampling") or {}, sort_keys=True))
                 for run in runs]
     print(json.dumps({
         "labels": [run["label"] for run in runs],
@@ -832,9 +902,13 @@ def compare(paths):
         "gates_passed": [run["checks"].get("gates_passed") for run in runs],
         "relative_to_v2": relative or None,
         "totals": [run["totals"] for run in runs],
+        # What the owner reads first: does she hand every turn back, speak her
+        # traits as topics, or claim a past nobody recorded.
+        "service_profile": [_service_profile(run) for run in runs],
         "checks": [run["checks"] for run in runs],
         "measured_tokens_per_second": [run.get("measured_tokens_per_second") for run in runs],
         "server_sampling": [run.get("model", {}).get("server_sampling") for run in runs],
+        "sent_sampling": [run.get("model", {}).get("sent_sampling") or {} for run in runs],
         "acceptance": "not decided here: gates plus the blinded reader's labels (see --blind)",
         "note": "Same cases, different configuration. A difference here is a model or "
                 "configuration difference, not evidence that the code changed.",
@@ -884,8 +958,11 @@ def main():
                         help="Write a blinded side-by-side review of these reports")
     parser.add_argument("--blind-out", default="blind-review.json")
     parser.add_argument("--blind-key", default="blind-key.json")
-    parser.add_argument("--persona-projection", choices=("v1", "v2", "v3"), default=None,
+    parser.add_argument("--persona-projection", choices=("v1", "v2", "v3", "v4"), default=None,
                         help="Override config foundation.persona_projection for an A/B arm")
+    parser.add_argument("--sampling-file", default=None,
+                        help="Send these sampling fields (an owner-chosen arm, e.g. "
+                             "config/sampling/qwen3.5-nonthinking.candidate.json); default: none sent")
     parser.add_argument("--model-file", default=None,
                         help="Path of the GGUF the server loaded; its SHA-256 is recorded")
     args = parser.parse_args()
@@ -897,7 +974,8 @@ def main():
         print(json.dumps({"review": args.blind_out, "key": args.blind_key, "items": count}, ensure_ascii=False))
         return 0
     out = args.out or f"dialogue-{args.label}.json"
-    report = asyncio.run(run(args.label, out, set(args.case), args.persona_projection, args.model_file))
+    report = asyncio.run(run(args.label, out, set(args.case), args.persona_projection, args.model_file,
+                             args.sampling_file))
     captured = sum(report["totals"].values())
     expected = sum(len(case["turns"]) for case in CASES if not args.case or case["id"] in args.case)
     print(json.dumps({"label": report["label"], "totals": report["totals"],

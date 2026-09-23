@@ -5,7 +5,7 @@ from pathlib import Path
 import tomllib
 
 import xiyin_paths
-from .provider import ProviderConfig
+from .provider import ProviderConfig, sampling_pairs
 
 
 @dataclass(frozen=True)
@@ -18,7 +18,8 @@ class Settings:
     idle_sleep_seconds: int = 300
     # v3 is the speaking-model projection with voice and stance; v2 and v1
     # (byte-identical to the projection the Windows acceptance run tested)
-    # stay selectable for A/B and rollback.
+    # stay selectable for A/B and rollback. v4 is v3 with the per-turn
+    # decision projection; it is an arm until the owner adopts it.
     persona_projection: str = "v3"
 
 
@@ -42,8 +43,8 @@ def load_settings() -> Settings:
     if type(idle_sleep) is not int or not 0 <= idle_sleep <= 86400:
         raise ValueError("autonomy.idle_sleep_seconds must be 0..86400")
     projection = foundation.get("persona_projection", "v3")
-    if projection not in {"v1", "v2", "v3"}:
-        raise ValueError("foundation.persona_projection must be v1, v2 or v3")
+    if projection not in {"v1", "v2", "v3", "v4"}:
+        raise ValueError("foundation.persona_projection must be v1, v2, v3 or v4")
     return Settings(
         provider=ProviderConfig(
             endpoint=inference["endpoint"],
@@ -55,6 +56,7 @@ def load_settings() -> Settings:
             max_timeout_seconds=inference.get("max_timeout_seconds", 600),
             context_tokens=inference.get("context_tokens", 4096),
             default_tokens_per_second=inference.get("default_tokens_per_second", 8.0),
+            sampling=sampling_pairs(inference.get("sampling", {})),
         ),
         persona_path=xiyin_paths.resolve_path("character_seed"),
         idle_sleep_seconds=idle_sleep,

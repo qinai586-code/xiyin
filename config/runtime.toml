@@ -18,6 +18,13 @@ context_tokens = 4096
 # Starting throughput assumption until this machine has been measured.
 # Deliberately conservative: a CPU run is slower than a GPU run.
 default_tokens_per_second = 8.0
+# Sampling sent with each request. Absent (the default), nothing is sent and
+# the llama.cpp server's own defaults decide; every recorded A/B run used that.
+# Choosing values is an owner decision, run and reported as its own arm; see
+# config/sampling/ for a candidate and tools/acceptance_dialogue.py
+# --sampling-file to try one without editing this file.
+# [inference.sampling]
+# temperature = 0.7
 
 [foundation]
 max_input_chars = 2000

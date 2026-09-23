@@ -36,6 +36,12 @@ Appearance and the feelings/consciousness stance are stated only when a turn ask
 
 The harness now records full messages, raw chunks, released segments, plan receipts and model/build identity. It adds paired persona probes (P7, P8), a length-intent case (F10), absolute gates and a blinded review export. Capture success is not acceptance.
 
+**v4 arm and sampling arm (after the Windows A/B/C run, 2026-09-23).** See `docs/XIYIN_Windows_ABC_Diagnosis_and_Strategy_2026-09-23.md`. Every arm handed the turn back (a question or offer in the last two sentences) in 84–89% of casual replies, and spoke the seed's trait sentences as topics. `foundation.persona_projection = "v4"` (an arm; v3 stays the default):
+- **Speaking projection:** v3 without the seed's tendency defaults and motivation sentence; learned tendency revisions are still said.
+- **Decision projection:** `response_plan.turn_move` names the turn (`share`, `pushback`, `frame`, `plain`) from the owner's words and adds one private line, placed last in the system prompt and recorded as `move` in the plan receipt. Replies are never inspected or edited for it.
+- **Sampling:** `[inference.sampling]` (or the harness `--sampling-file`) sends validated sampling fields as an owner-chosen, recorded arm. When absent, nothing is sent, as before.
+- **Metrics:** `persona_style.v3` adds `hands_back`, `trait_echo` and `past_claim_unprompted`; `--compare` recomputes them from released text (`service_profile`).
+
 **Release boundary.**
 - Provenance labels come from the persona constructor and the runtime, never from records or model text.
 - A released unit may not carry 12 consecutive normalized characters of the private-instruction corpus (8 when the user asks for the prompt). Runs that span a release boundary still stop the remainder. Public values are exempt. An unresolved hold at the end of the reply is released, not rejected.

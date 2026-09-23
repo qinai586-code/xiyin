@@ -234,6 +234,61 @@ class HarnessLogicTests(unittest.TestCase):
             restored = {mapping[letter]: reply["raw_generation"] for letter, reply in item["replies"].items()}
             self.assertEqual(restored, {"qwen4b-v1": "甲", "qwen4b-v2": "乙", "qwen4b-v3": "丙"})
 
+    def test_service_profile_rescored_from_released_text(self):
+        # Reports captured before the metric existed carry no hands_back field;
+        # compare recomputes it from what was released.
+        run = {"cases": [{"id": "P5_casual_sharing", "turns": [
+            {"input": "今天下雨了。", "condition": "casual_share", "status": "completed",
+             "released_text": "下雨天挺适合听雨的。你呢？", "plan": {"move": None}},
+            {"input": "我刚打完一局游戏，输了。", "condition": "casual_share", "status": "completed",
+             "released_text": "输了就输了，下一局手感会回来的。", "plan": {"move": "share"}},
+            {"input": "我今天有点累。", "condition": "casual_share", "status": "blocked",
+             "released_text": "", "plan": {"move": "share"}}]}]}
+        profile = self.harness._service_profile(run)
+        self.assertEqual(profile["all"]["turns"], 2)
+        self.assertEqual(profile["casual_share_probes"]["hands_back"], 0.5)
+        self.assertEqual(profile["first_turn_of_case"]["hands_back"], 1.0)
+        self.assertEqual(profile["later_turns"]["hands_back"], 0.0)
+        self.assertEqual(profile["by_move"]["share"]["hands_back"], 0.0)
+        self.assertEqual(profile["version"], "persona_style.v3")
+
+    def test_a_different_sent_sampling_voids_the_comparison(self):
+        import contextlib
+        import io
+        import json
+        import tempfile
+
+        def run(label, sent):
+            return {"label": label, "persona_projection": "v3", "code_revision": "abc", "cases": [],
+                    "totals": {}, "checks": {},
+                    "model": {"server_sampling": {"settings": {"temperature": 0.8}}, "sent_sampling": sent}}
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            for label, sent in (("a", {}), ("b", {}), ("c", {"temperature": 0.7})):
+                path = Path(directory) / f"{label}.json"
+                path.write_text(json.dumps(run(label, sent)), encoding="utf-8")
+                paths.append(path)
+            for chosen, comparable in ((paths[:2], True), (paths, False)):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.harness.compare(chosen)
+                self.assertIs(json.loads(out.getvalue())["comparable"], comparable)
+
+    def test_a_sampling_file_is_validated_and_recorded(self):
+        import tempfile
+        candidate = Path(__file__).resolve().parents[1] / "config/sampling/qwen3.5-nonthinking.candidate.json"
+        pairs, chosen = self.harness._sampling_file(candidate)
+        self.assertEqual(dict(pairs), {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0,
+                                       "presence_penalty": 1.5})
+        self.assertEqual(chosen["file"], candidate.name)
+        # The candidate says where its numbers came from and that they are unverified here.
+        self.assertIn("could not be fetched", chosen["provenance"])
+        with tempfile.TemporaryDirectory() as directory:
+            bad = Path(directory) / "bad.json"
+            bad.write_text('{"values": {"temperature": 9}}', encoding="utf-8")
+            with self.assertRaises(Exception):
+                self.harness._sampling_file(bad)
+
     def test_model_identity_hashes_the_file_it_is_given(self):
         import hashlib
         import tempfile

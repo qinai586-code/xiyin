@@ -4,7 +4,7 @@
 DOCUMENT STATUS   = DESIGN · extends Architecture v1.0 M1 and v1.1 §15.2 / §16.3; replaces neither
 SCOPE             = how the character seed becomes speech, expression, choices and growth
 IMPLEMENTED       = only what §12 marks P0-done (v2 and v3 speaking projections, clock grounding,
-                    harness arms, persona_version and style counts in receipts, P1/P2/P4/P5 probes)
+                    harness arms, persona_version and style counts in receipts, P1–P6 probes)
 DEFINITION        = what XIYIN is as an AI, and the v3 projection: XIYIN_Persona_Definition_v1.md
 NOT CLAIMED       = any real-model result; Neuro-sama / 木几萌 / Shizuku internals
 ```
@@ -104,7 +104,7 @@ fully unit-testable.
 
 | Field | Purpose | Default when absent |
 |---|---|---|
-| `identity_agreements.*.disclosure` (or a `disclosure` map) | `public` / `private` per field; the owner decides what she may say about herself | names, relationships, artificial identity, presentation → public; wording → private |
+| `identity_agreements.public_scope_disclosure` (implemented, Definition §0) | `withheld` / `sayable` per relationship agreement in public scope; the owner decides what may be said to viewers. In private scope the agreements are sayable | a relationship agreement is withheld from public prompts; names, artificial self-facts, presentation → sayable; wording → private |
 | `presentation.body` | Appearance/voice attributes consumed only by the expression projection | taken from `presentation_seed` |
 | `tendencies[].behaviour` | Named parameters this tendency modulates (§7.3), with bounds from its counterexample | none (text only) |
 | `tendencies[].speech_hint` | ≤ 30 chars, positive, how the tendency sounds in speech | the `default` statement |
@@ -185,10 +185,20 @@ and voice; it never enters the prompt as a style instruction.
   to the body.
 - It is logged as an `expression_cue` event.
 
-This is the transferable part of muji-moe and Open-LLM-VTuber (FACT: muji-moe `chat.cpp`
-removes one `[…]` tag before TTS and maps it to a voice emotion). With a channel in place, the
-guard's stage-direction inventory shrinks to a structural check: any aside outside the channel
-is a violation. It stops being a growing list of gestures.
+This is the transferable part of muji-moe, Open-LLM-VTuber and AIRI (FACT, source read
+2026-09-23, commits in Definition §5):
+- muji-moe `chat.cpp` strips every `[…]` tag in a loop and maps the last one to a voice
+  emotion;
+- Open-LLM-VTuber maps `[key]` tags from the model's own `emotionMap` into
+  `Actions.expressions`;
+- AIRI parses `<|ACT {"emotion":…}|>` markers into a closed `Emotion` enum.
+
+N.E.K.O shows the state-driven alternative: a separate classifier maps the output text to a
+closed emotion set, and the model writes no cue at all.
+
+The cue parser must run **before** OutputGuard, whose protocol check blocks `<|…|>` markers.
+With a channel in place, the guard's stage-direction inventory shrinks to a structural check:
+any aside outside the channel is a violation. It stops being a growing list of gestures.
 
 ### 7.3 Decision projection (agenda and ResponsePlan)
 
@@ -281,7 +291,8 @@ content, simulations or blocked generations (v1.0 §13).
 | Benchmark | Transferable | Not transferable / unknown |
 |---|---|---|
 | Neuro-sama (public streams, Neuro SDK spec) | speech-only spoken output; short turns; typed game actions with schemas; `silent` context | model, prompt and training are not public; do not claim a replica |
-| 木几萌 / muji-moe (source read) | one expression tag parsed out before TTS and routed to voice emotion and the Live2D model | character prompt is user-supplied; model asset has its own licence |
+| 木几萌 / muji-moe (source read) | every `[…]` tag parsed out before TTS; the last one routed to voice emotion | character prompt is user-supplied; the raw tagged reply stays in chat history; model asset has its own licence |
+| N.E.K.O (source read) | spoken text kept free of stage directions; avatar emotion from a separate closed-set classifier | its default persona is a fictional "real person", which XIYIN's truth rules forbid |
 | Open-LLM-VTuber (source read) | display text, TTS text and actions as separate fields; `[expression]` keywords mapped to Live2D | strips asides for TTS but keeps them in memory, which conflicts with XIYIN's ledger truth |
 | AIRI (types read) | authority of context separate from instructions | no output confidentiality or persona growth model |
 | Shizuku | experience benchmark only | no inspected implementation |
@@ -292,7 +303,7 @@ content, simulations or blocked generations (v1.0 §13).
 
 | Phase | Deliverables | Exit criteria |
 |---|---|---|
-| **P0** (inside A, now) | ✅ v2 speaking projection + v1 kept for A/B; ✅ clock and honest action footing; ✅ harness arms and evidence; ✅ v3 projection (voice, stance, two exemplars; appearance by disclosure), exemplar experiment moved here from P1; ✅ `persona_projection` / `persona_sha256` / style counts in receipts; ✅ `persona_style` metrics; ✅ P1, P2, P4, P5 probe cases (P3 = F2/F4/F8). Remaining: P6 scope probe | Windows A/B/C report v1 vs v2 vs v3 on Qwen3.5-4B; zero released private runs ≥ 12; `persona_style` rates recorded per arm at the same recorded sampling |
+| **P0** (inside A, now) | ✅ v2 speaking projection + v1 kept for A/B; ✅ clock and honest action footing; ✅ harness arms and evidence; ✅ v3 projection (voice, stance, self-facts; no definition label; appearance and the feelings stance by disclosure; relationships withheld in public by default; exemplars off by default, Definition §0); ✅ `persona_projection` / `persona_sha256` / style counts in receipts; ✅ `persona_style` metrics; ✅ P1–P6 probe cases (P3 also F2/F4/F8), `scope_leaks` check | Windows A/B/C report v1 vs v2 vs v3 on Qwen3.5-4B; zero released private runs ≥ 12; `persona_style` rates recorded per arm at the same recorded sampling |
 | **P1** (A→B) | Persona Compiler + Snapshot; templates out of code; per-turn selection and budget; exemplar experiment | Snapshot version on every generation; probes non-inferior to v2; budget met |
 | **P2** (B, Voice Body) | Expression contract; Expression Mapper from state to TTS style and avatar; optional cue channel experiment | Voice and face from one snapshot; raw stage-direction rate at or below the owner's target, or channelled; guard stage check structural |
 | **P3** (C/D) | Decision projection (§7.3); revision lifecycle (§8); sleep proposes, gate adopts | One choice demonstrably changed by a formed revision; one revision weakened by correction; rollback drill; probes non-inferior after adoption |
@@ -306,13 +317,16 @@ new service, second model or data migration beyond additive fields.
 
 ## 13. Owner decisions needed
 
-1. **Disclosure.** May she state her relationship agreements in the seed's words? v2 and v3
-   assume yes and mark them public; v3 also marks her artificial self-facts public and states
-   appearance only when asked.
+1. **Disclosure.** May she state her relationship agreements in the seed's words, and where?
+   Since Definition §0, v3 makes them sayable in private and withholds them from public
+   prompts unless `public_scope_disclosure` says `sayable`. v2 still marks them public in
+   every scope. v3 marks her artificial self-facts sayable, and states appearance and the
+   feelings stance only when asked.
 2. **Expression cues.** State-driven expression only, or also the closed-vocabulary cue
    channel once an avatar exists (§7.2)?
-3. **Exemplars.** Allowed as style lines (never memory)? v3 projects two lines drafted from the
-   Character Bible v0.1 Candidate §16 for the owner to approve (Definition §11).
+3. **Exemplars.** Allowed as style lines (never memory)? Two lines drafted from the Character
+   Bible v0.1 Candidate §16 stay in the seed with `project: false`. Turning them on is the
+   §7.1 experiment and needs owner approval (Definition §11).
 4. **Growth autonomy.** May revealed-choice revisions become `active` through the policy gate
    without an explicit owner statement (v1.1 "少监督")? Default proposal: yes for preferences
    and opinions; temperament strength changes capped per week (v1.0 §8.1 ±0.05).

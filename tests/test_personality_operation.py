@@ -64,7 +64,7 @@ class PersonalityInOperationTests(unittest.IsolatedAsyncioTestCase):
         # The default (v3) labels the state as a runtime estimate; the v2 arm
         # keeps its tested wording (tests/test_persona_projection_v3.py).
         self.assertIn("当前状态（运行时估计", first)
-        self.assertIn("注意力在没有特别集中的事", first)
+        self.assertIn("注意力没有特别集中在哪件事上", first)
         await self.ask("在忙什么")
         self.assertIn("注意力在当前这句话", self.provider.system_prompt)
 

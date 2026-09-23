@@ -25,7 +25,9 @@ from .output_guard import _GESTURE_STRONG, _GESTURE_WEAK
 from .response_plan import classify
 
 
-VERSION = "persona_style.v1"
+# v2: the AI-disclaimer count also covers relabelled forms ("作为一个人工的
+# 存在", "我只是一个模型"), so a new label cannot hide the same speech.
+VERSION = "persona_style.v2"
 # Every seed anti-pattern with a metric names one of these.
 METRICS = ("service_phrases", "closing_offer", "sycophantic_opener", "moe_markers",
            "stage_directions", "ai_disclaimer", "list_structure", "intimacy_pressure",
@@ -52,7 +54,10 @@ _OPENER = re.compile(
     r"(?:great|good|excellent) question|absolutely|of course|sure thing|certainly)", re.I)
 _AI_DISCLAIMER = re.compile(
     r"作为(?:一个|一名)?(?:AI|人工智能|语言模型|大模型|程序|机器人|AI助手|虚拟助手)|"
-    r"我(?:只是|只不过是|仅仅是)(?:一个)?(?:AI|人工智能|程序|语言模型|机器)|"
+    # "作为模型的输入" is technical prose; the relabelled self-description
+    # needs an article or the label itself.
+    r"作为(?:一个|一种)(?:模型|人工的?存在)|作为人工的?存在|"
+    r"我(?:只是|只不过是|仅仅是)(?:一个|一种)?(?:AI|人工智能|程序|语言模型|模型|机器|人工(?:的)?存在)|"
     r"我(?:并)?没有(?:真正的|真实的)?(?:感情|情感|情绪|意识|感受)|"
     r"(?:无法|不能)(?:真正)?(?:体会|感受|拥有)(?:感情|情感|情绪)|"
     r"\bas an ai\b|\bi(?:'m| am) (?:just|only) (?:an? )?(?:ai|language model|program)\b|"

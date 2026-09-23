@@ -210,11 +210,15 @@ def _event_matches(store, session_id, scope, pattern):
     return found
 
 
-def topic_records(store, text: str, *, session_id: str, scope: str) -> list[dict[str, str]]:
+def topic_records(store, text: str, *, session_id: str, scope: str,
+                  relationship_sayable: bool = True) -> list[dict[str, str]]:
     """State the real inventory for topics the report showed her inventing.
 
     Only the topics actually raised are projected, so the context budget is
     spent on the question being asked rather than on a standing disclaimer.
+    ``relationship_sayable`` is False where the persona withholds the sister
+    agreement (a public scope by default): the inventory still holds, but the
+    record does not restate a relationship the prompt deliberately left out.
     """
     records: list[dict[str, str]] = []
     if _QINAI.search(text):
@@ -227,7 +231,8 @@ def topic_records(store, text: str, *, session_id: str, scope: str) -> list[dict
                   "本会话对话记录": f"{len(events)} 条"}
         if memories:
             record["记忆内容"] = _brief("；".join(item["statement"] for item in memories), 200)
-        record["说明"] = ("姐妹关系是身份约定，共同经历必须有记录。没有记录时说明还没有一起经历过什么，"
+        record["说明"] = (("姐妹关系是身份约定，" if relationship_sayable else "")
+                          + "共同经历必须有记录。没有记录时说明还没有一起经历过什么，"
                           "不要描述没有发生的合作、对话或玩过的东西。")
         records.append(record)
     if _BACKGROUND.search(text):

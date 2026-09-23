@@ -167,10 +167,11 @@ class RuntimeServices:
         except Exception:
             return facts
         attention = disposition["attention"]
-        focus = "当前这句话" if attention == "current_input" else (attention or "没有特别集中的事")
+        attention_text = ("注意力在当前这句话" if attention == "current_input" else
+                          f"注意力在{attention}" if attention else "注意力没有特别集中在哪件事上")
         acted = disposition["footing"] != "这段会话还没有执行过动作"
         facts += ("\n当前状态（运行时估计，用来调语气，不用说出来）：" + labels.get(activity, activity)
-                  + f"，注意力在{focus}，语气{disposition['tone']}，状态{disposition['energy']}"
+                  + f"，{attention_text}，语气{disposition['tone']}，状态{disposition['energy']}"
                   + (f"，{disposition['footing']}" if acted else "") + "。")
         return facts
 

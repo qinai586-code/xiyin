@@ -159,7 +159,11 @@ class XIYINRuntime(RuntimeServices):
             records.append(memory_receipt_record(item))
             if len(seen_memories) >= 2:
                 break
-        records.extend(topic_records(self.store, text, session_id=session_id, scope=scope))
+        # v1/v2 keep their tested records; v3 withholds what its prompt withholds.
+        sister = (self.settings.persona_projection != "v3"
+                  or self.persona.relationship_sayable("qinai_relationship", scope))
+        records.extend(topic_records(self.store, text, session_id=session_id, scope=scope,
+                                     relationship_sayable=sister))
         for item in self.store.search(text, scope=scope, session_id=session_id, limit=3):
             record = retrieved_record(item)
             if record is not None:

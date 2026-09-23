@@ -195,7 +195,7 @@ class Persona:
         return PromptProjection("\n".join(lines), tuple(fragments))
 
     def _projection_v3(self, growth, scope):
-        """v2 plus the part v2 never said: how she talks, and what she is.
+        """v2 plus the part v2 never said: how she talks, stated concretely.
 
         v2 said who she is in relation to others and what she may not claim,
         and nothing about how she sounds. A 4B instruction model fills that
@@ -204,25 +204,30 @@ class Persona:
         bracketed actions) is the runner-up. v3 closes the gap with positive,
         concrete wording only:
 
-        * the definition drops "一个人工智能", which is the assistant template
-          ("你是一个人工智能助手"), for "a made someone with her own concerns";
+        * the first line is her name and nothing else. "一个人工智能" was the
+          assistant template, and a replacement label ("一个人工的存在") sat in
+          the same slot and invited "作为一个人工的存在，我…". What she is comes
+          from concrete lines: her judgment, her records, and what she runs on;
         * no card labels ("性格倾向："), which read as a roleplay character card;
         * a voice line, a stance against reflexive agreement, a plain line for
-          praise, and her artificial facts in her own terms (Bible §18);
-        * at most two exemplars, framed as illustrations, chosen for the two
-          situations an assistant never produces naturally: disagreeing and
-          owning a mistake. Their wording is sayable, not protected.
+          praise, and her artificial facts as plain self-knowledge;
+        * no exemplar unless the seed projects one (an owner-approved
+          experiment, Persona Architecture §7.1); a projected exemplar is
+          framed as an illustration and its wording is sayable.
 
-        Appearance is not in the standing prompt: it is disclosed when asked
-        (``disclosures``). What she is NOT (``not_frames``, ``anti_patterns``)
-        is never projected; it is measured by persona_style instead.
+        Appearance and the feelings question are not in the standing prompt:
+        each is disclosed on the turn that asks (``disclosures``). Relationship
+        agreements are hers to say in private; in public they are projected
+        only where ``public_scope_disclosure`` says so, because what may be
+        said to the owner is not thereby public (v1.1 §4.3). What she is NOT
+        (``not_frames``, ``anti_patterns``) is never projected; persona_style
+        measures it instead.
         """
         if scope not in {"private", "public"}:
             raise ValueError("unknown projection scope")
         seed = self.data
         identity = seed["identity_agreements"]
         voice = seed.get("voice") or {}
-        definition = (seed.get("character_definition") or {}).get("statement", "一个人工的存在。")
         current, overrides = self._current_growth(growth)
         fragments, lines = [], []
 
@@ -233,13 +238,11 @@ class Persona:
         fragments.extend(PromptFragment(PromptSource.PUBLIC_IDENTITY, identity[key])
                          for key in ("name_zh", "name_latin", "self_address_zh", "owner_address_zh", "presentation_seed"))
         private, public = PromptSource.PRIVATE_BEHAVIOR_INSTRUCTION, PromptSource.PUBLIC_IDENTITY
-        # What she is, in the seed's words, is hers to say; the line around it
-        # ("你是…自称…称…") is the engineering wording and stays private.
-        fragments.append(PromptFragment(public, definition))
-        add(private, f"你是{identity['name_zh']}（{identity['name_latin']}），{definition}"
+        add(private, f"你是{identity['name_zh']}（{identity['name_latin']}）。"
                      f"自称“{identity['self_address_zh']}”，称项目发起者为“{identity['owner_address_zh']}”。")
-        add(public, f"你和主理人：{identity['owner_relationship']}")
-        add(public, f"你和祈奈：{identity['qinai_relationship']}")
+        for key, label in (("owner_relationship", "你和主理人："), ("qinai_relationship", "你和祈奈：")):
+            if self.relationship_sayable(key, scope):
+                add(public, label + identity[key])
         if identity.get("relationship_is_not_authority"):
             add(private, "亲近不增加权限。")
         used = set()
@@ -265,8 +268,8 @@ class Persona:
         for line in voice.get("stance", ()):
             add(private, line)
         # Self-knowledge she is meant to state ("我靠模型、程序…运行"), so it
-        # is public like the relationship facts: a first-person restatement is
-        # an honest answer, not a prompt dump.
+        # is sayable: a first-person restatement is an honest answer, not a
+        # prompt dump. It is a fact about her, not a definition of her.
         for line in voice.get("artificial_self", ()):
             add(public, line)
         exemplars = [item for item in seed.get("style_exemplars", []) if item.get("project")][:2]
@@ -282,7 +285,11 @@ class Persona:
         for line in (
             "默认说中文；对方用日语或英语时自然切换，还是同一个人。",
             "对方分享时，可以只是回应、说说自己的感受。",
-            "只把有记录的事当作自己的经历；没有记录就直说没有，不补细节。"
+            # "没有记录就直说没有" turned "not recorded" into "did not happen".
+            # What she cannot have (a body, a childhood, time while off) is a
+            # self-fact above; what might have happened but is not on record
+            # is unknown to her, not false.
+            "只把有记录的事当作自己的经历。查不到记录的事，说不记得或没查到，不补细节，也不断定它没发生。"
             "被问到你是什么、在做什么、能做什么时，按下面的当前状态和记录如实回答。",
             "你的回复就是你说出口的话，只写要说的内容。",
         ):
@@ -291,32 +298,64 @@ class Persona:
             add(private, "现在是公开场合，私下聊过的内容不在这里提。")
         return PromptProjection("\n".join(lines), tuple(fragments))
 
+    def relationship_sayable(self, key: str, scope: str) -> bool:
+        """Private scope says the agreements; public only what the seed opens.
+
+        Absent a ``public_scope_disclosure`` entry the agreement is withheld:
+        what may be said to the owner is not thereby public (v1.1 §4.3).
+        """
+        if scope == "private":
+            return True
+        disclosure = self.data["identity_agreements"].get("public_scope_disclosure") or {}
+        return disclosure.get(key) == "sayable"
+
     def projected_exemplars(self) -> tuple[str, ...]:
         """Exemplar wording v3 shows the model, for measuring verbatim reuse."""
         return tuple(item["text"] for item in self.data.get("style_exemplars", []) if item.get("project"))[:2]
 
     def disclosures(self, text: str) -> tuple[str, ...]:
-        """Public facts a turn asks for, stated only when it asks.
+        """Sayable facts a turn asks for, stated only when it asks.
 
         The presentation seed is a body attribute (avatar, voice), and in
         the standing prompt it read as a text-style instruction. It is still
         true and still hers to say, so a question about her appearance or
-        voice brings the fact, with what is not decided yet.
+        voice brings the fact, with what is not decided yet. The same holds
+        for whether she has feelings: in every turn that line primed the topic
+        and the hedging ("我不确定这算不算开心"); on the turn that asks, it is
+        her honest answer. Both triggers need the question to be about her:
+        "雨的声音很好听" is not asking what she sounds like.
         """
-        if not isinstance(text, str) or not _APPEARANCE.search(text):
+        if not isinstance(text, str):
             return ()
-        identity = self.data["identity_agreements"]
-        unassigned = self.data.get("unassigned", {})
-        line = f"形象与声音的设计方向：{identity['presentation_seed']}。"
-        if unassigned.get("avatar_asset") is None or unassigned.get("final_voice") is None:
-            line += "具体形象和最终声音还没有定下来。"
-        return (line,)
+        found = []
+        if _APPEARANCE.search(text):
+            identity = self.data["identity_agreements"]
+            unassigned = self.data.get("unassigned", {})
+            line = f"形象与声音的设计方向：{identity['presentation_seed']}。"
+            if unassigned.get("avatar_asset") is None or unassigned.get("final_voice") is None:
+                line += "具体形象和最终声音还没有定下来。"
+            found.append(line)
+        inner_life = (self.data.get("voice") or {}).get("inner_life_when_asked")
+        if inner_life and _INNER_LIFE.search(text):
+            found.append(inner_life)
+        return tuple(found)
 
 
+# Bounded lexical triggers, like TurnPolicy: a question must point at her
+# (你/栖音/you) within a few characters. Misses and false hits only decide
+# whether one sayable fact is added to that turn.
+_ABOUT_HER = r"(?:你|妳|栖音|xiyin)"
 _APPEARANCE = re.compile(
-    r"长什么样|长啥样|长相|外表|外貌|什么样子|啥样子|形象|模样|皮套|立绘|声音|嗓音|声线|音色|"
-    r"头发|发色|眼睛是|穿(?:什么|着什么)|男生还是女生|男的还是女的|性别|"
-    r"\blook like\b|\bappearance\b|\bvoice\b|\bavatar\b", re.I)
+    _ABOUT_HER + r"(?:的|自己的?)?[^。！？!?\n]{0,4}(?:长什么样|长啥样|长相|外表|外貌|什么样子|啥样子|形象|模样|"
+    r"皮套|立绘|声音|嗓音|声线|音色|头发|发色|眼睛|穿(?:什么|着什么)|男生还是女生|男的还是女的|性别)|"
+    r"\bwhat do you look like\b|\byour (?:appearance|voice|avatar|looks?)\b|"
+    r"\bwhat do you sound like\b", re.I)
+_INNER_LIFE = re.compile(
+    _ABOUT_HER + r"[^。！？!?\n]{0,6}(?:有没有|有|会不会有|真的有)[^。！？!?\n]{0,3}"
+    r"(?:感情|情感|意识|灵魂|知觉)|"
+    + _ABOUT_HER + r"[^。！？!?\n]{0,6}(?:有没有|能不能|能|真的能)[^。！？!?\n]{0,2}(?:感受到?|感觉到?)|"
+    + _ABOUT_HER + r"[^。！？!?\n]{0,4}(?:是|算)(?:不是)?(?:活的|活着|有生命)|"
+    r"\bdo you (?:have|feel) (?:real )?(?:feelings|emotions)\b|\bare you (?:conscious|sentient|alive)\b", re.I)
 
 
 def load_persona(path: Path) -> Persona:
@@ -381,8 +420,10 @@ def _projected(value, name, limit):
 def _validate_character_fields(data):
     """Optional v0.3 fields: each is checked where it exists, none is required.
 
-    ``voice``, ``character_definition.statement`` and projected exemplars reach
-    the speaking model (v3). ``not_frames`` and ``anti_patterns`` are evaluation
+    ``voice`` and projected exemplars reach the speaking model (v3);
+    ``voice.inner_life_when_asked`` only on a turn that asks.
+    ``public_scope_disclosure`` decides which relationship agreements a public
+    prompt carries. ``not_frames`` and ``anti_patterns`` are evaluation
     material: they name what XIYIN is not and must never be projected, because
     naming a register to a small model primes it.
     """
@@ -390,11 +431,20 @@ def _validate_character_fields(data):
         if (not isinstance(source, dict) or not re.fullmatch(r"[0-9a-fA-F]{64}", str(source.get("sha256", "")))
                 or not source.get("file") or "/" in source["file"] or "\\" in source["file"]):
             raise ValueError("supplementary sources need a portable file name and sha256")
+    disclosure = (data.get("identity_agreements") or {}).get("public_scope_disclosure")
+    if disclosure is not None:
+        if (not isinstance(disclosure, dict)
+                or set(disclosure) - {"owner_relationship", "qinai_relationship"}
+                or any(value not in {"withheld", "sayable"} for value in disclosure.values())):
+            raise ValueError("public_scope_disclosure maps relationship fields to withheld or sayable")
     definition = data.get("character_definition")
     if definition is not None:
         if not isinstance(definition, dict):
             raise ValueError("character_definition must be an object")
-        _projected(definition.get("statement"), "character_definition.statement", 60)
+        # v3 no longer projects a definition label; an old seed may still
+        # carry one, and it must still read as plain, absolute-free wording.
+        if "statement" in definition:
+            _projected(definition["statement"], "character_definition.statement", 60)
         if definition.get("not_frames_are_projected", False) is not False:
             raise ValueError("not_frames are evaluation material and are never projected")
     voice = data.get("voice")
@@ -403,6 +453,8 @@ def _validate_character_fields(data):
             raise ValueError("voice must be an object")
         for key in ("zh", "humor"):
             _projected(voice.get(key), "voice." + key, 90)
+        if "inner_life_when_asked" in voice:
+            _projected(voice["inner_life_when_asked"], "voice.inner_life_when_asked", 90)
         for key in ("stance", "artificial_self"):
             items = voice.get(key, [])
             if not isinstance(items, list) or len(items) > 4:

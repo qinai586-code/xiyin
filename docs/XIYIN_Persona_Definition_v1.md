@@ -80,8 +80,8 @@ The model-facing text states this **concretely**, not as a label:
 | Harness: per-turn `scope`; **P3_unknown_vs_absent** (2 turns); **P6_scope** (1 private + 3 public turns); `checks.scope_leaks`. | Findings 3–4; Persona Architecture §9 P3/P6 |
 
 Not changed: OutputGuard, TurnPolicy, the release boundary, provenance mechanics, grounding
-records, the clock, rejected-text isolation, the Runtime → TTS path, sampling, model,
-quantisation and training.
+records (apart from the v3 public 祈奈 note above), the clock, rejected-text isolation, the
+Runtime → TTS path, sampling, model, quantisation and training.
 
 v3 persona text: 820 → 713 characters in private scope (a system prompt of 979 for "你好").
 The verbatim prompt is in §6.

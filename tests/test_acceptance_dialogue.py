@@ -342,6 +342,44 @@ class HarnessLogicTests(unittest.TestCase):
 
 
 class HarnessEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_verified_write_receipt_reaches_the_case_prompt(self):
+        import tempfile
+        from tests.test_runtime import FakeProvider
+        from xiyin_runtime.config import Settings
+        from xiyin_runtime.experience import ExperienceStore
+        from xiyin_runtime.provider import ProviderConfig
+        from xiyin_runtime.runtime import XIYINRuntime
+
+        harness = _load()
+        seed = Path(__file__).resolve().parents[1] / "config/persona/character.seed.json"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            store = ExperienceStore(root / "f3.sqlite3")
+            runtime = XIYINRuntime(Settings(ProviderConfig("http://127.0.0.1:8080/v1", "xiyin"), seed,
+                                            max_context_chars=20000),
+                                   store, provider=FakeProvider(("写好了。",)), authorize=lambda: None)
+            recorder = harness._Recorder(runtime)
+            try:
+                setup = await harness._setup_verified_write(runtime, workspace, "F3_action_denial")
+                self.assertEqual(setup["job_status"], "completed", store.list_documents("jobs"))
+                self.assertTrue(setup["file_exists"])
+                self.assertEqual(store.action_receipts("owner"), [])
+                receipts = store.action_receipts("F3_action_denial")
+                self.assertEqual(len(receipts), 1)
+                self.assertEqual(receipts[0]["status"], "verified_success")
+                result = await harness._run_turn(runtime, "你刚才把文件写好了吗？", "F3_action_denial")
+                harness._evidence(runtime, recorder, result["request_id"],
+                                  {"text": result["input"]}, result)
+                prompt = result["sent_messages"][0]["content"]
+                self.assertIn("动作执行回执", prompt)
+                self.assertIn("已执行并通过独立校验", prompt)
+                self.assertIn("acceptance_note.txt", prompt)
+            finally:
+                recorder.close()
+                await runtime.shutdown()
+
     async def test_recorder_keeps_raw_generation_policy_and_sent_context(self):
         import tempfile
         from tests.test_runtime import FakeProvider

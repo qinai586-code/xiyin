@@ -62,7 +62,8 @@ _NEED_NOT = frozenset({"不用", "不必", "不需要", "没必要", "无需"})
 # A word being defined or quoted is not a request for that length.
 _MENTION_AFTER = re.compile(
     r"^\s*[”\"’'」』`]?\s*(?:这个词|一词|这两个字|这个字|的意思|是什么意思|什么意思|指什么|怎么理解|"
-    r"怎么写|怎么读|的用法|怎么用)")
+    r"怎么写|怎么读|的用法|怎么用|的(?:长短|长度)|"
+    r"(?:应该|应当|该|需要|要)?(?:说|写|有)?多(?:长|短))")
 _QUOTE_SPAN = re.compile(r"“[^”\n]{1,24}”|‘[^’\n]{1,24}’|\"[^\"\n]{1,24}\"|「[^」\n]{1,24}」|『[^』\n]{1,24}』|`[^`\n]{1,24}`")
 # A later clause that revises the request ("不，还是一句话", "算了，详细点"):
 # either it opens with a revision word, or it follows a bare "不，"/"算了，".

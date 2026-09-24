@@ -30,6 +30,7 @@ class PremisePolarityTests(unittest.TestCase):
     def verdict(self, stored, claim="你之前说过‘今晚想看星星’"):
         self.count += 1
         store = ExperienceStore(Path(self.temp.name) / f"{self.count}.sqlite3")
+        self.addCleanup(store.close)
         store.append_event("assistant", stored, session_id="s", scope="private",
                            origin="assistant_output", status="completed", request_id=f"r{self.count}")
         [record] = premise_records(store, claim, session_id="s", scope="private")
@@ -57,6 +58,7 @@ class PublicSisterDisclosureTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.store = ExperienceStore(Path(self.temp.name) / "s.sqlite3")
+        self.addCleanup(self.store.close)
 
     def test_a_kinship_word_does_not_resolve_to_her_when_withheld(self):
         records = topic_records(self.store, "你妹妹最近怎么样？", session_id="s", scope="public",

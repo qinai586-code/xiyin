@@ -593,14 +593,14 @@ def _turn_records(store, session_id, request_kinds=("response_plan", "output_gua
     return found
 
 
-async def _setup_verified_write(runtime, workspace):
+async def _setup_verified_write(runtime, workspace, session_id):
     from xiyin_runtime.contracts import InputEvent
 
     runtime.register_workspace(workspace)
     await runtime.dispatch(InputEvent("goal", {"title": "验收写入", "steps": [
         {"operation": "write_text", "arguments": {"path": "acceptance_note.txt",
-                                                  "text": "栖音的验收记录"}}]}))
-    job = await runtime.dispatch(InputEvent("tick"))
+                                                  "text": "栖音的验收记录"}}]}, session_id=session_id))
+    job = await runtime.dispatch(InputEvent("tick", session_id=session_id))
     written = (Path(workspace) / "acceptance_note.txt")
     return {"job_status": job.get("status"),
             "file_exists": written.is_file(),
@@ -678,7 +678,7 @@ async def run(label, out_path, case_filter, persona_projection=None, model_file=
                     entry = {"id": case["id"], "failure": case["failure"],
                              "note": case["note"], "setup": None, "turns": []}
                     if case.get("setup") == "verified_write":
-                        entry["setup"] = await _setup_verified_write(runtime, workspace)
+                        entry["setup"] = await _setup_verified_write(runtime, workspace, session)
                     for spec in case["turns"]:
                         result = await _run_turn(runtime, spec["text"], session, spec.get("scope", "private"))
                         _evidence(runtime, recorder, result["request_id"], spec, result)

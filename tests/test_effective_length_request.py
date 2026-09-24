@@ -44,6 +44,18 @@ class EffectiveRequestTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertFalse(classify(text)[1].endswith("+corrected"))
 
+    def test_sentence_length_is_a_topic_not_a_short_answer_request(self):
+        for text in ("详细解释一下你是怎么判断一句话该说多长的。",
+                     "详细讲讲一句话应该写多长。", "详细说明一句话的长度如何确定。"):
+            with self.subTest(text=text):
+                result = plan(text)
+                self.assertEqual((result.scale, result.reason), ("detailed", "owner_asked_for_detail"))
+                self.assertNotIn("先一句话总结", result.directive)
+        self.assertFalse(classify("你怎么判断一句话该说多长？")[1].startswith("owner_"))
+        # An explicit output constraint still applies, even on this topic.
+        self.assertEqual(classify("请用一句话解释你怎么判断句子长短。"),
+                         ("brief", "owner_asked_for_brevity"))
+
     def test_negation_means_what_it_says(self):
         for text, scale in (("不需要简短，正常聊就好。", "normal"), ("别太简短", "normal"),
                             ("别只简单讲讲，详细一点", "detailed"), ("我不想听简单解释", "detailed"),

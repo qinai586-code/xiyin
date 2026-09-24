@@ -53,7 +53,9 @@ import argparse
 import difflib
 import hashlib
 import json
+import os
 import re
+import stat
 import sys
 import time
 from pathlib import Path
@@ -131,8 +133,11 @@ def _check_store_location(store: Path) -> Path:
     forbidden = [xiyin_paths.project_root().resolve()]
     try:
         forbidden.append(xiyin_paths.data_root().resolve())
-    except Exception:
-        pass  # no configured data root on this machine: nothing to collide with
+    except xiyin_paths.XiyinPathError as exc:
+        if xiyin_paths.DATA_ENV in os.environ:
+            raise CandidateDataError("explicit XIYIN data root could not be validated") from exc
+        # Without an override, configured data paths are confined to the
+        # repository, which is already forbidden even before data is created.
     for root in forbidden:
         if resolved == root or root in resolved.parents:
             raise CandidateDataError(f"store must be outside {root}")
@@ -141,6 +146,18 @@ def _check_store_location(store: Path) -> Path:
 
 def _open_store(store: str, *, create: bool = False) -> Path:
     root = _check_store_location(Path(store))
+    # Existing store entries must be independent regular files. Resolving
+    # only the directory does not protect against linked JSONL/manifest files.
+    # This is an offline, single-writer check, not protection against races.
+    for name in ("manifest.json", *FILES.values()):
+        path = root / name
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+            raise CandidateDataError(f"store entry must be an independent regular file: {name}")
     manifest = root / "manifest.json"
     if create:
         root.mkdir(parents=True, exist_ok=True)

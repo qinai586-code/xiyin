@@ -497,7 +497,7 @@ def _evidence(runtime, recorder, request_id, spec, result):
             "scale", "reason", "requested_by_owner", "directive_sent", "max_tokens", "timeout_seconds",
             "provider_end", "ended_naturally", "outcome", "released_chars", "generated_chars",
             "model_first_token_seconds", "first_released_segment_seconds", "generation_seconds",
-            "persona_projection", "persona_sha256")}
+            "persona_projection", "persona_sha256", "move")}
     # This harness has no voice body attached: nothing was submitted to TTS
     # and no playback was observed, which is recorded rather than implied.
     result["tts"] = {"attached": False, "submitted_segments": [], "playback_observed": False}

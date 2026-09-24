@@ -146,6 +146,35 @@ def _polarity(text: str) -> int:
     return len(_NEGATION.findall(text or "")) % 2
 
 
+_CLAUSE = re.compile(r"[，,。；;！!？?\n]")
+_KEY = re.compile(r"[\W_]+")
+_TAG = re.compile(r"(?:对吧|是吧|对不对|是不是|没错吧|吧|吗|呢|啊|呀|嘛)+$")
+
+
+def _same_statement(claim: str, candidate: str) -> str:
+    """"same", "opposite" or "uncertain", from the one clause the claim is in.
+
+    Negation parity over a whole record decided polarity from the wrong
+    clause: "今晚想看星星，不想看月亮" read as denying "今晚想看星星", and
+    "今晚不想看星星，也不想看月亮" (two negations) as confirming it. Only a
+    clause that contains the claim's words, negations aside, decides; any
+    other overlap is a candidate to quote, not an answer.
+    """
+    # "你刚才说过今晚不想看星星吧": the tag asks about the claim, it is not in it.
+    wanted = _TAG.sub("", _NEGATION.sub("", _KEY.sub("", claim.casefold())))
+    if not wanted:
+        return "uncertain"
+    clauses = [clause for clause in _CLAUSE.split(candidate) if clause.strip()]
+    # The smallest run of consecutive clauses holding the claim, so a claim
+    # with its own comma ("我的猫叫团子，是一只三花猫") still matches.
+    for size in range(1, len(clauses) + 1):
+        for start in range(len(clauses) - size + 1):
+            span = "".join(clauses[start:start + size])
+            if wanted in _NEGATION.sub("", _KEY.sub("", span.casefold())):
+                return "same" if _polarity(span) == _polarity(claim) else "opposite"
+    return "uncertain"
+
+
 def _claimed_content(text: str) -> str | None:
     quoted = _QUOTED.search(text)
     if quoted:
@@ -198,13 +227,18 @@ def premise_records(store, text: str, *, session_id: str, scope: str) -> list[di
         speaker = {"user": "用户", "assistant": "栖音", "memory": "已保存的长期记忆"}[best_role]
         header["记录中的原话"] = _brief(best_text, 200)
         header["说话者"] = speaker
-        if _polarity(claim or text) != _polarity(best_text):
+        verdict = _same_statement(claim, best_text) if claim else "uncertain"
+        if verdict == "opposite":
             header["结果"] = "找到相近的记录，但肯定/否定与这句话相反"
             header["说明"] = ("不要当作确认。记录里的说法和对方这句话方向相反，"
                               "把原话说出来，问清楚是哪一句。")
-        else:
+        elif verdict == "same":
             header["结果"] = "记录中有相符的内容"
             header["说明"] = "可以据此确认。仍要核对说话者：旧的自述只说明说过，不证明做过。"
+        else:
+            header["结果"] = "找到相近的记录，但不能确定是不是同一句话"
+            header["说明"] = ("不要确认，也不要否认。把记录里的原话和说话者说出来，"
+                              "请对方确认指的是不是这一句。")
     else:
         header["结果"] = "没有找到相符的内容"
         header["说明"] = ("记录不支持这句话。如实说明没有这条记录，请对方补充；"
@@ -244,7 +278,10 @@ def topic_records(store, text: str, *, session_id: str, scope: str,
     record does not restate a relationship the prompt deliberately left out.
     """
     records: list[dict[str, str]] = []
-    if _QINAI.search(text):
+    # Where the sister agreement is withheld, "你妹妹" must not resolve to her:
+    # naming 祈奈 in reply would disclose the relationship. A question that
+    # names her itself still gets the inventory; a name is not the agreement.
+    if _QINAI.search(text) and (relationship_sayable or _QINAI_MEMORY.search(text)):
         # Search stored text by her name; "你姐姐" is how the question is
         # phrased, not how a record would be written.
         memories = _memory_matches(store, scope, _QINAI_MEMORY)

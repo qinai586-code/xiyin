@@ -316,6 +316,16 @@ _MOVE_DIRECTIVE = {
 _ENDING = "说完就停，接不接着聊由对方决定。"
 
 
+# Quoted speech is someone else's words; reported speech ("同事对我说…") and the
+# owner correcting themself ("我说错了") are not aimed at her. Those turns
+# abstain from pushback and frame rather than guess at a target.
+_QUOTED_SPEECH = re.compile(r"“[^”\n]*”|‘[^’\n]*’|\"[^\"\n]*\"|「[^」\n]*」|『[^』\n]*』")
+_REPORTED = re.compile(r"(?:对我|跟我|和我|冲我|向我)(?:说|讲|喊|骂|吼)|(?:说|讲|问|骂)[:：]")
+_SELF_CORRECTION = re.compile(r"我(?:刚才|之前|刚刚)?(?:说|记|写|打|算|看|听)?(?:错|反)了|是我(?:弄|搞|记)?错")
+# A clause that opens with a verb aimed at the listener ("借我…", "陪我…").
+_IMPERATIVE = re.compile(r"(?:^|[，,。！!；;])\s*(?:借|陪|教|带|送|拿|递|帮|让)我")
+
+
 def turn_move(text: str, *, mode: str, scale: str, reason: str = "") -> str | None:
     """v4's decision for one turn, from the owner's words and TurnPolicy's mode.
 
@@ -327,13 +337,17 @@ def turn_move(text: str, *, mode: str, scale: str, reason: str = "") -> str | No
         return None
     value = text.strip()
     if mode == "conversation":
-        if _FRAME.search(value):
+        own = _QUOTED_SPEECH.sub("", value)
+        aimed = not _REPORTED.search(value)
+        if aimed and _FRAME.search(own):
             return "frame"
+        if _SELF_CORRECTION.search(own):
+            return "plain"
         # "不，还是一句话" revises a length request; it disputes nothing she said.
-        if _PUSHBACK.search(value) and "corrected" not in reason:
+        if aimed and _PUSHBACK.search(own) and "corrected" not in reason:
             return "pushback"
-        if (len(value) <= 80 and not reason.startswith("owner_") and not _ASKS.search(value)
-                and not _ADDRESSES_HER.search(value) and not _REQUEST.search(value)):
+        if (len(value) <= 80 and not reason.startswith("owner_") and not _ASKS.search(own)
+                and not _ADDRESSES_HER.search(own) and not _REQUEST.search(own) and not _IMPERATIVE.search(own)):
             return "share"
     return "plain"
 

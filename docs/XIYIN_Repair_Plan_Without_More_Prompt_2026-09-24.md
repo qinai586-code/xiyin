@@ -98,3 +98,45 @@ in the prompt, and a style classifier that blocks replies.
 - [YuriOS](https://github.com/yuri-os/YuriOS); [Miru](https://github.com/kiyotakali/Miru)
 - [Neuro SDK spec](https://github.com/VedalAI/neuro-sdk/blob/main/API/SPECIFICATION.md)
 - Previous source list: the taxonomy doc §9.
+
+## 6. Owner decisions (2026-09-24)
+
+| Repair | Decision | Status |
+|---|---|---|
+| R1 | Authorised as an **offline V5 prompt ablation only** (`R1_V5_OFFLINE_ABLATION_ONLY`); see `XIYIN_V5_Prompt_Ablation_2026-09-24.md` | Implemented as the `v5` projection; not the default |
+| R8 | **Local candidate-data collection only** (`LOCAL_CANDIDATE_DATA_COLLECTION_ONLY`). RAW_CANDIDATE only; the 81-turn corpus is EVAL_HOLDOUT; no training, weight change or upload | Implemented as `tools/candidate_data.py` |
+| R3 | Specified below | **Not implemented; not bundled with V5** |
+| R2 (asides) | Specified below | **Not implemented; not bundled with V5** |
+
+**R3 — integrity selection, owner specification:**
+1. Generate 2–3 candidates.
+2. Release a passing candidate if one exists.
+3. If none passes, retry generation once.
+4. If none passes again, release **no** model candidate. Emit only a short, deterministic,
+   runtime-owned abstention, for example "这轮我没法可靠确认，先不乱说。".
+   - It is not derived from any rejected candidate.
+   - It reveals no prompts, guard rules or debugging details.
+
+- **Hard constraints:** false memory or experience; false action success; an invalid identity or
+  relationship frame; a deterministically wrong fact; private or internal-text leakage.
+- **The selector never judges** personality, warmth, humour, terseness, initiative, wording or
+  style. Those stay evaluation concerns.
+- **Rejected candidates:** logged with their reasons for audit only. They are kept out of
+  history, memory, datasets, growth or self-model evidence, and TTS or playback.
+- **Turn record:** an abstaining turn is recorded as abstained/failed-safe, never as completed.
+
+**R2 — asides, owner specification:**
+- The Living State is the source of truth. A model-written aside ("（笑）", "（停顿一下）") is
+  at most a weak expression or prosody proposal.
+- For now:
+  - remove benign supported asides from spoken and displayed text;
+  - never let them modify emotion, mood, self-state, memory or experience;
+  - do not execute them on the avatar unless an Expression Mapper with a compatible current
+    state and a closed supported vocabulary exists;
+  - log them as `expression_candidate` if useful.
+- A cue that conflicts with the current state is ignored. Example: the state is annoyed and the
+  model writes "（笑）" → do not set happy, do not force a smile.
+- Fictional physical narration ("（走到窗边）", "（拿起杯子）", "（抱住主理人）") is not an
+  expression cue. It stays a violation and triggers regeneration or rejection.
+- Long-term: verified event/appraisal → Living State → Expression Mapper → text register, TTS
+  prosody, Live2D. Never model-generated expression text → Living State.

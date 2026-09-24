@@ -50,6 +50,11 @@ class GroundingScopeTruthTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("也不说成确定从来没有过", system)
                 self.assertIsNone(NON_OCCURRENCE.search(system.split("参考记录", 1)[-1]))
 
+    async def test_v5_states_the_empty_inventory_as_coverage_not_denial(self):
+        system = await self.system(self.runtime("v5"), "你和祈奈一起做过什么？")
+        self.assertIn("没有记录不等于没有发生", system)
+        self.assertIsNone(NON_OCCURRENCE.search(system.split("参考记录", 1)[-1]))
+
     async def test_public_scope_does_not_read_a_private_memory_as_absence(self):
         runtime = self.runtime()
         runtime.remember("祈奈昨天和我们一起看了星星。", kind="fact", subject="祈奈")

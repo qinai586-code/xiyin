@@ -958,7 +958,7 @@ def main():
                         help="Write a blinded side-by-side review of these reports")
     parser.add_argument("--blind-out", default="blind-review.json")
     parser.add_argument("--blind-key", default="blind-key.json")
-    parser.add_argument("--persona-projection", choices=("v1", "v2", "v3", "v4"), default=None,
+    parser.add_argument("--persona-projection", choices=("v1", "v2", "v3", "v4", "v5"), default=None,
                         help="Override config foundation.persona_projection for an A/B arm")
     parser.add_argument("--sampling-file", default=None,
                         help="Send these sampling fields (an owner-chosen arm, e.g. "

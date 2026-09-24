@@ -19,7 +19,8 @@ class Settings:
     # v3 is the speaking-model projection with voice and stance; v2 and v1
     # (byte-identical to the projection the Windows acceptance run tested)
     # stay selectable for A/B and rollback. v4 is v3 with the per-turn
-    # decision projection; it is an arm until the owner adopts it.
+    # decision projection; it is an arm until the owner adopts it. v5 is the
+    # identity-card-only ablation (owner-authorised offline experiment).
     persona_projection: str = "v3"
 
 
@@ -43,8 +44,8 @@ def load_settings() -> Settings:
     if type(idle_sleep) is not int or not 0 <= idle_sleep <= 86400:
         raise ValueError("autonomy.idle_sleep_seconds must be 0..86400")
     projection = foundation.get("persona_projection", "v3")
-    if projection not in {"v1", "v2", "v3", "v4"}:
-        raise ValueError("foundation.persona_projection must be v1, v2, v3 or v4")
+    if projection not in {"v1", "v2", "v3", "v4", "v5"}:
+        raise ValueError("foundation.persona_projection must be v1, v2, v3, v4 or v5")
     return Settings(
         provider=ProviderConfig(
             endpoint=inference["endpoint"],

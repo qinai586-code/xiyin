@@ -69,8 +69,11 @@ class Persona:
         ``v1`` is byte-identical to the projection the Windows run tested;
         ``v2`` is the speaking-model projection described on _projection_v2;
         ``v3`` adds how she talks, see _projection_v3; ``v4`` is v3 with
-        tendencies and motivations moved to the decision projection.
+        tendencies and motivations moved to the decision projection; ``v5``
+        is the identity card alone, see _projection_v5.
         """
+        if version == "v5":
+            return self._projection_v5(growth, scope)
         if version == "v4":
             return self._projection_v3(growth, scope, traits_in_speech=False)
         if version == "v3":
@@ -78,7 +81,7 @@ class Persona:
         if version == "v2":
             return self._projection_v2(growth, scope)
         if version != "v1":
-            raise ValueError("persona projection must be v1, v2, v3 or v4")
+            raise ValueError("persona projection must be v1, v2, v3, v4 or v5")
         seed = self.data
         current, overrides = self._current_growth(growth)
         lines = self._identity_lines()
@@ -312,6 +315,60 @@ class Persona:
             add(private, line)
         if scope == "public":
             add(private, "现在是公开场合，私下聊过的内容不在这里提。")
+        return PromptProjection("\n".join(lines), tuple(fragments))
+
+    def _projection_v5(self, growth, scope):
+        """Who she is and nothing about how to behave: the R1 prompt ablation.
+
+        Owner-authorised offline experiment (2026-09-24). A casual v4 turn
+        sent about 1,100 system characters, over half of them behaviour prose
+        (the honesty rule three times), and she recited it back ("这是规矩").
+        v5 keeps what is true of her:
+        - her name and address forms;
+        - her relationships, as scope disclosure allows;
+        - the authority fact;
+        - her artificial self-facts;
+        - what she has learned (growth entries, including revised tendencies).
+
+        Removed, not reworded elsewhere:
+        - tendencies and motivations;
+        - the expression register;
+        - voice, humour, stance and praise lines;
+        - the language, sharing, honesty and speech-frame lines;
+        - the second half of the public-scope line (a rule, not a fact).
+
+        Evidence rules live in the records' provenance and coverage fields
+        (grounding.evidence_view), not in prose.
+        """
+        if scope not in {"private", "public"}:
+            raise ValueError("unknown projection scope")
+        identity = self.data["identity_agreements"]
+        voice = self.data.get("voice") or {}
+        current, _ = self._current_growth(growth)
+        fragments, lines = [], []
+
+        def add(source, line):
+            lines.append(line)
+            fragments.append(PromptFragment(source, line))
+
+        fragments.extend(PromptFragment(PromptSource.PUBLIC_IDENTITY, identity[key])
+                         for key in ("name_zh", "name_latin", "self_address_zh", "owner_address_zh", "presentation_seed"))
+        private, public = PromptSource.PRIVATE_BEHAVIOR_INSTRUCTION, PromptSource.PUBLIC_IDENTITY
+        add(private, f"你是{identity['name_zh']}（{identity['name_latin']}）。"
+                     f"自称“{identity['self_address_zh']}”，称项目发起者为“{identity['owner_address_zh']}”。")
+        for key, label in (("owner_relationship", "你和主理人："), ("qinai_relationship", "你和祈奈：")):
+            if self.relationship_sayable(key, scope):
+                add(public, label + identity[key])
+        if identity.get("relationship_is_not_authority"):
+            add(private, "亲近不增加权限。")
+        for line in voice.get("artificial_self", ()):
+            add(public, line)
+        for entry in current:
+            prefix = "当前成长记忆（" + str(entry.get("kind", "knowledge")) + "）："
+            lines.append(prefix + entry["statement"].strip())
+            fragments.append(PromptFragment(private, prefix))
+        if scope == "public":
+            add(private, "现在是公开场合。")
         return PromptProjection("\n".join(lines), tuple(fragments))
 
     def relationship_sayable(self, key: str, scope: str) -> bool:

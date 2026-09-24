@@ -333,3 +333,27 @@ def topic_records(store, text: str, *, session_id: str, scope: str,
 
 def json_size(records) -> int:
     return len(json.dumps(records, ensure_ascii=False, separators=(",", ":")))
+
+
+# v5 (owner-authorised R1 ablation): records carry evidence, not behaviour
+# prose. Each "说明" field mixed a coverage fact ("公开场合看不到私下的记录")
+# with rules ("不要顺着确认…"). evidence_view drops "说明" and keeps what the
+# record can and cannot see as a plain "覆盖" fact, so an empty search still
+# reads as "not found here", never as "did not happen".
+_NOT_FOUND = "记录可能不全；没查到不等于没发生。"
+_COVERAGE = {
+    "与祈奈相关的记录": "只含本会话对话与本场合的长期记忆；没有记录不等于没有发生。",
+    "对话之外的活动": ("你做的动作、观察和整理都会记入这份记录；这里只列本会话、本场合。"
+                   "本会话、本场合没有记录的活动没有发生；别的会话或场合的记录这里看不到。"),
+}
+
+
+def evidence_view(record: dict[str, str], scope: str) -> dict[str, str]:
+    """A record without its behaviour prose, with its coverage stated as fact."""
+    view = {key: value for key, value in record.items() if key != "说明"}
+    coverage = _COVERAGE.get(record.get("主题", ""))
+    if record.get("来源") == "对本轮说法的记录核对" and record.get("结果") == "没有找到相符的内容":
+        coverage = _NOT_FOUND
+    if coverage or (scope == "public" and "说明" in record and record.get("来源") != "动作执行回执"):
+        view["覆盖"] = (coverage or "") + _OUT_OF_SCOPE.get(scope, "")
+    return view

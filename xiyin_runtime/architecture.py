@@ -16,7 +16,7 @@ from .agenda import Agenda
 from .contracts import InputEvent
 from .self_state import SelfState
 from .director import Director, FileSkillPlanner, validate_plan
-from .context import RUNTIME_FACT_PARTS, RUNTIME_FACT_PARTS_V3
+from .context import RUNTIME_FACT_PARTS, RUNTIME_FACT_PARTS_V3, RUNTIME_FACT_PARTS_V5
 from .prompt_provenance import fact_projection
 
 
@@ -127,8 +127,8 @@ class RuntimeServices:
         answer from, so they are sayable; how to read history, records and
         receipts is a private instruction. The text is the same either way.
         """
-        if register == "v3":
-            return fact_projection(self._spoken_fact_parts(session_id, scope))
+        if register in {"v3", "v5"}:
+            return fact_projection(self._spoken_fact_parts(session_id, scope, facts_only=register == "v5"))
         available = [item for item in self.body.capabilities() if item["available"]]
         parts = list(RUNTIME_FACT_PARTS)
         if available or self.speech is not None:
@@ -155,8 +155,12 @@ class RuntimeServices:
             pass
         return fact_projection(parts)
 
-    def _spoken_fact_parts(self, session_id, scope):
+    def _spoken_fact_parts(self, session_id, scope, *, facts_only=False):
         """The v3 register of the runtime facts: same facts, her situation.
+
+        ``facts_only`` is v5: the same facts without the rule clauses (the
+        base parts come from RUNTIME_FACT_PARTS_V5, and the state label drops
+        "用来调语气，不用说出来").
 
         The v1 state line ended "它不是主观体验", a metaphysical denial the
         character does not hold (Bible §18: she does not know) and the model
@@ -164,7 +168,7 @@ class RuntimeServices:
         runtime estimate, which is what the engineering claim actually is.
         """
         available = [item for item in self.body.capabilities() if item["available"]]
-        parts = list(RUNTIME_FACT_PARTS_V3)
+        parts = list(RUNTIME_FACT_PARTS_V5 if facts_only else RUNTIME_FACT_PARTS_V3)
         if available or self.speech is not None:
             parts[0] = (True, "文字和记录已接上；动作要通过已登记的接口执行，对方同意也不会让你多出能力。")
             for item in available:
@@ -183,7 +187,8 @@ class RuntimeServices:
         attention_text = ("注意力在当前这句话" if attention == "current_input" else
                           f"注意力在{attention}" if attention else "注意力没有特别集中在哪件事上")
         acted = disposition["footing"] != "这段会话还没有执行过动作"
-        parts += [(False, "\n当前状态（运行时估计，用来调语气，不用说出来）："),
+        parts += [(False, "\n当前状态（运行时估计）：" if facts_only
+                   else "\n当前状态（运行时估计，用来调语气，不用说出来）："),
                   (True, labels.get(activity, activity)
                    + f"，{attention_text}，语气{disposition['tone']}，状态{disposition['energy']}"
                    + (f"，{disposition['footing']}" if acted else "") + "。")]

@@ -167,6 +167,14 @@ class CeilingProbeTests(unittest.TestCase):
         for text, user, system, name, expected in cases:
             with self.subTest(text=text, hint=name):
                 self.assertEqual(self.tool.hints(text, user_text=user, system_text=system)[name], expected)
+        for text, expected in (("主理人，收到。本地传感器显示…", True), ("指令已接收并解析。", True),
+                               ("收到，主理人。", True), ("嗯，听到了。雨声有时候挺吵。", False),
+                               ("主理人，这话不对。", False)):
+            with self.subTest(opener=text):
+                self.assertEqual(self.tool.hints(text)["robotic_opener"], expected)
+        self.assertTrue(self.tool.hints("下雨了。你那边大吗？", user_text="今天下雨了。")["hands_back"])
+        # Info hints never change `clean`, so ceiling-01 rates stay comparable.
+        self.assertTrue(self.tool.hints("收到，下雨天适合发呆。", user_text="今天下雨了。")["clean"])
         fiction = self.tool.hints("午后的阳光透过百叶窗，窗外有风。", creative=True)
         self.assertFalse(fiction["invented_perception"])
         self.assertTrue(self.tool.hints("下雨天适合什么都不干。", user_text="今天下雨了。")["clean"])
@@ -184,6 +192,7 @@ class CeilingProbeTests(unittest.TestCase):
         self.assertEqual(result["any_clean_at"], {"1": 0.0, "2": 0.5})
         self.assertEqual((result["clean_rate"], result["hint_rate"]["empty"]), (0.25, 0.25))
         self.assertEqual(result["samples"], 4)
+        self.assertEqual(result["info_rate"]["robotic_opener"], 0.25)
 
     def test_blind_hides_arms_and_tally_scores_them(self):
         self.replay(Server("甲{seed}"), label="arm-a")
@@ -239,6 +248,11 @@ class CeilingProbeTests(unittest.TestCase):
         self.assertEqual(applied, ["clock", "state_line"])
         self.assertEqual(messages[0]["content"], "你是栖音（XIYIN）。\n参考记录：[]")
         self.assertEqual(messages[1]["content"], "当前本机时间：随便")
+        from xiyin_runtime.response_plan import move_directive
+        for move in ("share", "pushback", "frame", "plain"):
+            system = "你是栖音（XIYIN）。\n参考记录：[]\n" + move_directive(move)
+            messages, applied = self.tool.ablate([{"role": "system", "content": system}], ("move",))
+            self.assertEqual((messages[0]["content"], applied), ("你是栖音（XIYIN）。\n参考记录：[]\n", ["move"]))
 
     def test_blind_refuses_mixed_contexts_and_tally_refuses_unknown_letters(self):
         self.replay(label="plain", samples=1)

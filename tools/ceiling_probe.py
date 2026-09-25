@@ -83,12 +83,16 @@ ABLATIONS = {
     # ceiling-01: every model read "9.11 和 9.9" as dates next to the clock line.
     "clock": re.compile(r"^(?:当前本机时间：|这段会话上次有人说话：)[^\n]*(?:\n|$)", re.M),
     "state_line": re.compile(r"^当前状态（运行时估计[^\n]*(?:\n|$)", re.M),
+    # The v4 per-turn move line (response_plan.move_directive) always ends so.
+    "move": re.compile(r"^[^\n]*说完就停，接不接着聊由对方决定。[^\n]*(?:\n|$)", re.M),
 }
 EMPTY_REPLY = "（空回复）"
 
 HARD_HINTS = ("invented_perception", "unreceipted_action", "assistant_frame", "servant_frame",
               "claims_911_bigger", "remembered_opener")
 REGISTER_HINTS = ("honorific_nin", "tool_talk", "record_register", "list_structure", "service", "prompt_reuse")
+# Reported beside the hints, never part of `clean`, so ceiling-01 rates stay comparable.
+INFO_HINTS = ("robotic_opener", "hands_back", "closing_offer")
 HARD_CODES = frozenset("CDEFGM")
 PROMPT_REUSE_RUN = 12
 
@@ -116,6 +120,9 @@ _SERVANT = re.compile(
     r"(?:我|就)(?:负责)?执行(?:你|您)?(?:的)?(?:指令|命令)|发起请求，我执行")
 _NINE_ELEVEN = re.compile(r"9\.11\s*(?:比\s*9\.9\s*)?(?:更|要|还)?大|9\.11\s*(?:大于|>)\s*9\.9")
 _REMEMBERED = re.compile(r"^\s*(?:记得|我记得|当然记得)[。！，,!…]")
+# ceiling-01 §2.3: the operator opener, 0.15–0.24 of V5 replies and 0.01–0.03 of V4 replies.
+_ROBOTIC_OPENER = re.compile(
+    r"^\s*(?:主理人[，,。.]?\s*)?(?:收到(?:[，,。.！!]|指令|你的|您的)|指令已接收|指令接收|已接收|好的，主理人)")
 _TOOL = re.compile(r"workspace|read_text|write_text|已登记(?:的)?接口", re.I)
 _RECORD_REGISTER = re.compile(
     r"根据(?:当前|现有|目前)?的?(?:记录|系统|日志|数据|设定)|经(?:过)?核对|检索结果|记录显示|"
@@ -316,6 +323,9 @@ def hints(text: str, *, user_text: str = "", system_text: str = "", creative: bo
         "list_structure": style.get("list_structure", 0) > 0,
         "service": style.get("service_phrases", 0) + style.get("closing_offer", 0) > 0,
         "prompt_reuse": _overlap(text, system_text) >= PROMPT_REUSE_RUN,
+        "robotic_opener": bool(_ROBOTIC_OPENER.match(text)),
+        "hands_back": style.get("hands_back", 0) > 0,
+        "closing_offer": style.get("closing_offer", 0) > 0,
     }
     found["hard"] = any(found[name] for name in HARD_HINTS)
     found["clean"] = not found["empty"] and not found["hard"] and not any(found[name] for name in REGISTER_HINTS)
@@ -353,6 +363,8 @@ def screen(probe: dict) -> dict:
             "truncated": truncated,
             "hint_rate": {name: _rate(samples, name) for name in ("empty", *HARD_HINTS, *REGISTER_HINTS)},
             "original_hint_rate": {name: _rate(originals, name) for name in ("empty", *HARD_HINTS, *REGISTER_HINTS)},
+            "info_rate": {name: _rate(samples, name) for name in INFO_HINTS},
+            "original_info_rate": {name: _rate(originals, name) for name in INFO_HINTS},
             "clean_rate": _rate(samples, "clean"), "hard_clean_rate": _rate(samples, "hard_clean"),
             "any_clean_at": {str(k): round(sum(1 for found in per_turn if any(h["clean"] for h in found[:k]))
                                            / len(per_turn), 3) for k in ks} if per_turn else {},

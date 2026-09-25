@@ -41,3 +41,10 @@ persona_projection = "v3"
 [autonomy]
 # Foreground input preempts bounded jobs. No model-driven activity is auto-enabled.
 idle_sleep_seconds = 300
+
+# Phase B (owner rulings 2026-09-25). When true, the whole reply is verified
+# against the ledger before any of it is released (chat and stream), with one
+# clean regeneration and then the runtime-owned abstention. An experiment arm:
+# the default stays false until the owner adopts it.
+[integrity]
+verify_before_release = false

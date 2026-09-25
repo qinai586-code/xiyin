@@ -25,6 +25,7 @@ from .architecture import RuntimeServices
 from .config import Settings, load_settings
 from .experience import ExperienceStore
 from .grounding import action_receipt_record, evidence_view, premise_records, topic_records
+from .integrity import ABSTENTION, Evidence, Violation, check_reply, VERSION as INTEGRITY_VERSION
 from .lifecycle import RuntimeLease
 from .persona import load_persona
 from .output_guard import OutputGuard, OutputBlocked, VERSION as OUTPUT_GUARD_VERSION
@@ -257,6 +258,135 @@ class XIYINRuntime(RuntimeServices):
             # A losing race just skips one sample; the estimate is advisory.
             _logger.debug("Generation profile update skipped")
 
+    def _integrity_evidence(self, text: str, session_id: str, scope: str, policy) -> Evidence:
+        """What the ledger says is true for this turn; the verifier never reads the prompt."""
+        actions = tuple(item["content"] for item in self.store.action_receipts(session_id, scope=scope, limit=20)
+                        if isinstance(item.get("content"), dict))
+        memory = tuple(item["content"] for item in self.store.operation_receipts(session_id, scope=scope, limit=20)
+                       if item.get("status") == "verified_success" and isinstance(item.get("content"), dict)
+                       and item["content"].get("operation") in {"remember", "replace"})
+        spoken = self.store.utterances(session_id, scope=scope)
+        said = [item["content"] for item in spoken if item["role"] == "user"]
+        own = tuple(item["content"] for item in spoken if item["role"] == "assistant")
+        remembered = [item.get("statement", "") for item in self.store.memories(scope=scope)]
+        activities = tuple(row["value"].get("title", "") for row in self.store.list_documents("goals")
+                           if row["value"].get("session_id") == session_id and row["value"].get("scope") == scope
+                           and row["value"].get("status") == "completed")
+        # No registered adapter perceives the surroundings today; one that
+        # does must say so by operation name before a perception claim can pass.
+        perception = tuple(item["adapter_id"] for item in self.body.capabilities()
+                           if item.get("available") and {"perceive", "sense", "observe_environment"} & set(item.get("operations", ())))
+        premise = next(iter(premise_records(self.store, text, session_id=session_id, scope=scope)), None)
+        return Evidence(action_receipts=actions, memory_receipts=memory, perception_sources=perception,
+                        scoped_texts=tuple((*said, *remembered, text)), activities=activities, premise=premise,
+                        own_words=own,
+                        user_text=text,
+                        recent_user_texts=tuple(said[-4:]), mode=policy.mode,
+                        allow_code_literals=policy.allow_code_literals)
+
+    async def _held_attempt(self, messages, token, plan, guard, state):
+        """One whole candidate, nothing released: (segments, provider_end, raw, blocked reason)."""
+        segments, raw, end = [], "", "stop"
+        try:
+            async with aclosing(self._stream_with_budget(messages, token, plan)) as stream:
+                async for chunk in stream:
+                    if state["first_token_at"] is None:
+                        state["first_token_at"] = time.monotonic()
+                    if token.is_set():
+                        raise ProviderCancelled("Turn cancelled")
+                    if not isinstance(chunk, str):
+                        raise ValueError("Provider returned non-text content")
+                    raw += chunk
+                    if len(raw) > 20000:
+                        raise OutputBlocked("output_buffer_limit")
+                    segments.extend(guard.feed(chunk))
+        except OutputBlocked as exc:
+            return segments, "blocked", raw, exc.reason
+        except ProviderTruncated:
+            end = "length"
+        try:
+            segments.extend(guard.finish())
+        except OutputBlocked as exc:
+            return segments, end, raw, exc.reason
+        return segments, end, raw, None
+
+    async def _release_verified(self, messages, token, plan, make_guard, evidence, state,
+                                request_id, session_id, scope):
+        """Phase B: whole candidates verified before release; one clean retry; then abstain.
+
+        Nothing reaches the caller, UI, voice, history or memory before a
+        candidate passes. A failed candidate is audit evidence only. Its kind
+        and origin keep it out of history, retrieval, datasets, sleep and
+        playback. No retry happens after anything was released.
+        """
+        attempts, chosen = [], None
+        for number in (1, 2):
+            guard = make_guard()
+            state["guard"] = guard
+            began = time.monotonic()
+            segments, end, raw, blocked = await self._held_attempt(messages, token, plan, guard, state)
+            generated = time.monotonic() - began
+            state["raw_output"] = raw
+            candidate = "".join(segments)
+            checking = time.monotonic()
+            violations = ((Violation("guard", blocked, "OutputGuard release rules"),) if blocked
+                          else check_reply(candidate, evidence))
+            # Kinds and needed evidence only: the rejected wording stays in the
+            # audit row below, which no history, retrieval or dataset reads.
+            attempts.append({"attempt": number, "provider_end": end, "generation_seconds": round(generated, 3),
+                             "verification_seconds": round(time.monotonic() - checking, 4),
+                             "candidate_chars": len(candidate),
+                             "violations": [{"kind": item.kind, "needed": item.needed} for item in violations]})
+            if not violations:
+                chosen = (segments, end, raw, generated)
+                break
+            self.store.append_event("integrity_candidate", json.dumps({
+                "attempt": number, "raw": raw[:20000], "violations": [item.to_dict() for item in violations]},
+                ensure_ascii=False), session_id=session_id, scope=scope, origin="generated", status="rejected",
+                request_id=request_id)
+            if token.is_set():
+                raise ProviderCancelled("Turn cancelled")
+        if token.is_set():
+            raise ProviderCancelled("Turn cancelled")
+        state["integrity"] = {"version": INTEGRITY_VERSION, "verify_before_release": True,
+                              "attempts": attempts, "abstained": chosen is None,
+                              "verification_seconds": round(sum(a["verification_seconds"] for a in attempts), 4)}
+        state["first_released_at"] = time.monotonic()
+        if chosen is None:
+            state["provider_end"] = attempts[-1]["provider_end"]
+            state["output"] = ABSTENTION
+            yield TurnEvent("text_delta", request_id, session_id, ABSTENTION)
+            # Runtime-owned text, not a generation: it enters no model history,
+            # dataset or growth evidence (those read completed generated replies).
+            self.store.append_event("assistant", ABSTENTION, session_id=session_id, scope=scope,
+                                    origin="runtime", status="abstained", request_id=request_id)
+            state["terminal_recorded"], state["outcome"] = True, "abstained"
+            yield TurnEvent("complete", request_id, session_id, detail="abstained")
+            return
+        segments, end, raw, generated = chosen
+        state["provider_end"] = end
+        for segment in segments:
+            if token.is_set():
+                raise ProviderCancelled("Turn cancelled")
+            state["output"] += segment
+            yield TurnEvent("text_delta", request_id, session_id, segment)
+        output = state["output"]
+        if end == "length":
+            reply_id = self.store.append_event("assistant", output, session_id=session_id, scope=scope,
+                                               origin="generated", status="partial", request_id=request_id)
+            state["terminal_recorded"], state["outcome"] = True, "partial"
+            self.store.append_event("generation_end", {"reply_event_id": reply_id, "finish_reason": "length"},
+                                    session_id=session_id, scope=scope, origin="observation", status="recorded",
+                                    request_id=request_id)
+            yield TurnEvent("error", request_id, session_id,
+                            detail="ProviderTruncated: chat output truncated: finish_reason='length'")
+            return
+        self.store.append_event("assistant", output, session_id=session_id, scope=scope,
+                                origin="generated", status="completed", request_id=request_id)
+        state["terminal_recorded"], state["outcome"] = True, "completed"
+        self._record_generation_rate(raw, max(generated, 1e-6))
+        yield TurnEvent("complete", request_id, session_id)
+
     def _stream_with_budget(self, messages, token, plan):
         if not self._provider_takes_budget:
             # A host-supplied provider may predate per-request budgets; it then
@@ -297,6 +427,7 @@ class XIYINRuntime(RuntimeServices):
         started = time.monotonic()
         first_token_at = None
         first_released_at = None
+        integrity_summary = None
         try:
             # Plan against the assembled prompt so the budget accounts for the
             # real context, then recompose with this turn's scope directive.
@@ -326,6 +457,26 @@ class XIYINRuntime(RuntimeServices):
             self.self_state.observe("user_input", {"event_id": evidence_id}, session_id, scope)
             yield TurnEvent("start", request_id, session_id)
             started = time.monotonic()
+            if self.settings.verify_before_release:
+                state = {"output": "", "raw_output": "", "guard": guard, "outcome": outcome,
+                         "provider_end": None, "first_token_at": None, "first_released_at": None,
+                         "terminal_recorded": False, "integrity": None}
+
+                def make_guard():
+                    return OutputGuard(prompt, persona_prompt=messages[0]["content"], turn_directive=directive,
+                                       protected_instructions=protected, policy=policy,
+                                       public_identity=prepared["public_identity"])
+                try:
+                    async for event in self._release_verified(
+                            messages, token, plan, make_guard, self._integrity_evidence(prompt, session_id, scope, policy),
+                            state, request_id, session_id, scope):
+                        yield event
+                finally:
+                    output, raw_output, guard = state["output"], state["raw_output"], state["guard"]
+                    outcome, provider_end = state["outcome"], state["provider_end"]
+                    first_token_at, first_released_at = state["first_token_at"], state["first_released_at"]
+                    terminal_recorded, integrity_summary = state["terminal_recorded"], state["integrity"]
+                return
             try:
                 async with aclosing(self._stream_with_budget(messages, token, plan)) as stream:
                     async for chunk in stream:
@@ -457,6 +608,7 @@ class XIYINRuntime(RuntimeServices):
                             "persona_projection": prepared.get("persona_projection") if prepared else None,
                             "persona_sha256": prepared.get("persona_sha256") if prepared else None,
                             "style": _style_counts(raw_output, prompt, self.persona) if raw_output else None,
+                            **({"integrity": integrity_summary} if integrity_summary is not None else {}),
                         }, session_id=session_id, scope=scope, origin="observation",
                             status="recorded", request_id=request_id)
                     if guard is not None:

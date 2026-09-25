@@ -22,6 +22,10 @@ class Settings:
     # decision projection; it is an arm until the owner adopts it. v5 is the
     # identity-card-only ablation (owner-authorised offline experiment).
     persona_projection: str = "v3"
+    # Phase B (owner rulings 2026-09-25): verify the whole reply before any of
+    # it is released, one clean regeneration, then the runtime abstention.
+    # Default off; turning it on is an experiment arm until the owner adopts it.
+    verify_before_release: bool = False
 
 
 def load_settings() -> Settings:
@@ -43,6 +47,9 @@ def load_settings() -> Settings:
     idle_sleep = config.get("autonomy", {}).get("idle_sleep_seconds", 300)
     if type(idle_sleep) is not int or not 0 <= idle_sleep <= 86400:
         raise ValueError("autonomy.idle_sleep_seconds must be 0..86400")
+    verify = config.get("integrity", {}).get("verify_before_release", False)
+    if type(verify) is not bool:
+        raise ValueError("integrity.verify_before_release must be true or false")
     projection = foundation.get("persona_projection", "v3")
     if projection not in {"v1", "v2", "v3", "v4", "v5"}:
         raise ValueError("foundation.persona_projection must be v1, v2, v3, v4 or v5")
@@ -62,5 +69,6 @@ def load_settings() -> Settings:
         persona_path=xiyin_paths.resolve_path("character_seed"),
         idle_sleep_seconds=idle_sleep,
         persona_projection=projection,
+        verify_before_release=verify,
         **values,
     )

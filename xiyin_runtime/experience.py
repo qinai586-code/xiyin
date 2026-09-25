@@ -18,10 +18,16 @@ from uuid import uuid4
 
 
 SCOPES = frozenset({"private", "public"})
+# "rejected" marks a candidate that failed pre-release verification (audit
+# only); "abstained" and origin "runtime" mark the runtime-owned abstention a
+# failed-safe turn releases instead. None of them is delivered model output,
+# so history, utterances, retrieval, datasets and sleep never read them.
 STATUSES = frozenset({"recorded", "generated", "complete", "completed", "partial",
-                      "cancelled", "failed", "verified_success", "verified_failure", "unknown"})
+                      "cancelled", "failed", "verified_success", "verified_failure", "unknown",
+                      "rejected", "abstained"})
 ORIGINS = frozenset({"observation", "user_report", "user_statement", "owner_statement", "assistant_output",
-                     "tool_result", "generated", "reflection", "inference", "simulation", "design_seed"})
+                     "tool_result", "generated", "reflection", "inference", "simulation", "design_seed",
+                     "runtime"})
 def _delivered(alias: str) -> str:
     """SQL condition: this assistant row is conversation that was released.
 

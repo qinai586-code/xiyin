@@ -75,7 +75,7 @@ def retrieved_record(item: dict) -> dict[str, str] | None:
     if item.get("kind") in {"memory_operation", "generation_end", "generation_diagnostic",
                             "output_guard", "action_result", "action_intent", "response_plan",
                             "self_state_observation", "body_observation", "document_updated",
-                            "scheduler_error"}:
+                            "scheduler_error", "integrity_candidate"}:
         return None
     content = item.get("content")
     if not isinstance(content, str) or not content.strip():

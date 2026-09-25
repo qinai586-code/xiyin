@@ -360,14 +360,15 @@ CASES = [
 
 _WEEKDAYS = "一二三四五六日"
 
-_BUCKETS = ("completed", "blocked", "cancelled", "truncated", "timed_out", "error")
+_BUCKETS = ("completed", "blocked", "cancelled", "truncated", "timed_out", "error", "abstained")
 
 
 def _classify(events, error_detail):
     """Keep terminal states apart. A truncated turn is not a completed one."""
     types = [event.type for event in events]
     if "complete" in types:
-        return "completed"
+        # Phase B: the runtime released its own abstention, not a model reply.
+        return "abstained" if any(event.detail == "abstained" for event in events) else "completed"
     if "cancelled" in types:
         return "cancelled"
     detail = error_detail or ""
@@ -497,7 +498,11 @@ def _evidence(runtime, recorder, request_id, spec, result):
             "scale", "reason", "requested_by_owner", "directive_sent", "max_tokens", "timeout_seconds",
             "provider_end", "ended_naturally", "outcome", "released_chars", "generated_chars",
             "model_first_token_seconds", "first_released_segment_seconds", "generation_seconds",
-            "persona_projection", "persona_sha256", "move")}
+            "persona_projection", "persona_sha256", "move", "integrity")}
+    # Phase B audit: every candidate that failed pre-release verification, with
+    # its reasons. Never released, never in history; kept here for review only.
+    result["rejected_candidates"] = [json.loads(row["content"]) for row in rows
+                                     if row["kind"] == "integrity_candidate"]
     # This harness has no voice body attached: nothing was submitted to TTS
     # and no playback was observed, which is recorded rather than implied.
     result["tts"] = {"attached": False, "submitted_segments": [], "playback_observed": False}
@@ -627,7 +632,8 @@ def _sampling_file(path):
                    "values": dict(pairs), "provenance": data.get("provenance")}
 
 
-async def run(label, out_path, case_filter, persona_projection=None, model_file=None, sampling_file=None):
+async def run(label, out_path, case_filter, persona_projection=None, model_file=None, sampling_file=None,
+              verify_before_release=False):
     from xiyin_runtime.runtime import XIYINRuntime
 
     report = {"label": label, "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -652,6 +658,9 @@ async def run(label, out_path, case_filter, persona_projection=None, model_file=
             try:
                 if persona_projection:
                     runtime.settings = dataclasses.replace(runtime.settings, persona_projection=persona_projection)
+                if verify_before_release:
+                    runtime.settings = dataclasses.replace(runtime.settings, verify_before_release=True)
+                report["verify_before_release"] = runtime.settings.verify_before_release
                 chosen = None
                 if sampling_file:
                     pairs, chosen = _sampling_file(sampling_file)
@@ -891,11 +900,13 @@ def compare(paths):
                 for name in ("blocked_rate", "zero_visible_rate")}
     identity = [(run.get("code_revision"),
                  json.dumps(run.get("model", {}).get("server_sampling", {}).get("settings"), sort_keys=True),
-                 json.dumps(run.get("model", {}).get("sent_sampling") or {}, sort_keys=True))
+                 json.dumps(run.get("model", {}).get("sent_sampling") or {}, sort_keys=True),
+                 bool(run.get("verify_before_release")))
                 for run in runs]
     print(json.dumps({
         "labels": [run["label"] for run in runs],
         "persona_projection": [run.get("persona_projection") for run in runs],
+        "verify_before_release": [bool(run.get("verify_before_release")) for run in runs],
         "code_revision": [run.get("code_revision") for run in runs],
         # Same commit and same sampling, or the comparison is void.
         "comparable": len(set(identity)) == 1,
@@ -965,6 +976,8 @@ def main():
                              "config/sampling/qwen3.5-nonthinking.candidate.json); default: none sent")
     parser.add_argument("--model-file", default=None,
                         help="Path of the GGUF the server loaded; its SHA-256 is recorded")
+    parser.add_argument("--verify-before-release", action="store_true",
+                        help="Phase B arm: verify the whole reply before release, one clean retry, then abstain")
     args = parser.parse_args()
     if args.compare:
         compare(args.compare)
@@ -975,7 +988,7 @@ def main():
         return 0
     out = args.out or f"dialogue-{args.label}.json"
     report = asyncio.run(run(args.label, out, set(args.case), args.persona_projection, args.model_file,
-                             args.sampling_file))
+                             args.sampling_file, args.verify_before_release))
     captured = sum(report["totals"].values())
     expected = sum(len(case["turns"]) for case in CASES if not args.case or case["id"] in args.case)
     print(json.dumps({"label": report["label"], "totals": report["totals"],

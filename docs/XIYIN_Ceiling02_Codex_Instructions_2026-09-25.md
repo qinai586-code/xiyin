@@ -1,5 +1,7 @@
 # 给 Codex：ceiling-02（A 阶段）执行指令
 
+> **怎么跑，以 `docs/XIYIN_Codex_Runbook_Ceiling02_PhaseB01_2026-09-25.md` 为准**：一条命令跑完，由 `tools/codex_eval_pipeline.py` 执行。本文件保留为方法说明和判读规则。
+
 依据：`docs/XIYIN_After_Ceiling01_Diagnosis_and_Remediation_2026-09-25.md` §4 A 阶段。
 工具：`tools/ceiling_probe.py`，需要 `a14b739` 或更新的版本。新版本新增 `clock`、`state_line`、`move` 三个消融和 `info_rate`（机械开场、交回提问），盲评包也不再用后面的样本补空回复。
 

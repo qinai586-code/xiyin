@@ -1,5 +1,7 @@
 # 给 Codex：phase-b-01（发布前整段核验）Windows 受控验证
 
+> **怎么跑，以 `docs/XIYIN_Codex_Runbook_Ceiling02_PhaseB01_2026-09-25.md` 为准**：一条命令跑完，由 `tools/codex_eval_pipeline.py` 执行。本文件保留为方法说明和判读规则。
+
 依据：`docs/XIYIN_Phase_B_Integrity_JIT_Evidence_B0_2026-09-25.md` §3 与 §7。
 代码：`claude/brave-curie-l45uri-repair`，需要 `3585a8f` 或更新的版本。
 

@@ -24,7 +24,7 @@
 
 ## 0. 准备
 
-1. 新建工作树，检出 `claude/brave-curie-l45uri-repair` 的最新 head，跑全量单测（本机 628 项，4 项平台跳过）。
+1. 新建工作树，检出 `claude/brave-curie-l45uri-repair` 的最新 head，跑全量单测，应全部通过（`ddc1c2d` 本机为 648 项，4 项平台跳过；Windows 上跳过数可能不同）。
 2. 下列文件沿用 ceiling-01，不重新生成：
 
    | 变量 | 文件 |

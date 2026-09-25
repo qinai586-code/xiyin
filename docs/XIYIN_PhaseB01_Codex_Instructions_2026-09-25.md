@@ -27,7 +27,7 @@
 
 ## 0. 准备
 
-1. 新建工作树，检出最新 head，跑 `.venv\Scripts\python.exe -m unittest discover -s tests`，应全部通过（本机为 647 项，4 项平台跳过）。
+1. 新建工作树，检出最新 head，跑 `.venv\Scripts\python.exe -m unittest discover -s tests`，应全部通过（`ddc1c2d` 本机为 648 项，4 项平台跳过；Windows 上跳过数可能不同）。
 2. 模型、服务器和启动参数与 ceiling-01 完全相同：
    - 4B Q4_K_M：`13c16f42…`；
    - 9B Q4_K_M：`d784ce9e…`；

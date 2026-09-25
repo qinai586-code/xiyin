@@ -1,7 +1,7 @@
 # 给 Codex：ceiling-02（A 阶段）执行指令
 
 依据：`docs/XIYIN_After_Ceiling01_Diagnosis_and_Remediation_2026-09-25.md` §4 A 阶段。
-工具：`tools/ceiling_probe.py`，需要 `53ef707` 或更新的版本。新版本新增 `clock`、`state_line`、`move` 三个消融，盲评包也不再用后面的样本补空回复。
+工具：`tools/ceiling_probe.py`，需要 `a14b739` 或更新的版本。新版本新增 `clock`、`state_line`、`move` 三个消融和 `info_rate`（机械开场、交回提问），盲评包也不再用后面的样本补空回复。
 
 ## 目的
 

@@ -4,7 +4,7 @@ Inputs:
 - Codex's `ceiling-01` bundle: 10 replay arms × 81 turns × 8 samples, and six full 9B runs;
 - Codex's diagnosis handoff (F1–F7);
 - the blind-only packet;
-- this branch at `53ef707`;
+- this branch at `a14b739`;
 - the project definition: `XIYIN_Persona_Definition_v1.md` §0.1 and `XIYIN_Persona_Architecture_v1.md` §10–11.
 
 Status: analysis and plan. No runtime, default, prompt or guard change is made here. Phase B below needs the owner's authorisation.

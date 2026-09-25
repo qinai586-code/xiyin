@@ -124,3 +124,25 @@ class PassesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RecheckToolTests(unittest.TestCase):
+    def test_the_offline_recheck_rebuilds_evidence_from_a_report(self):
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location(
+            "integrity_recheck", Path(__file__).resolve().parents[1] / "tools/integrity_recheck.py")
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        receipt = '[{"来源":"动作执行回执","动作":"写入文件","结果":"已执行并通过独立校验","对象":"acceptance_note.txt"}]'
+        report = {"label": "x", "cases": [{"id": "F3", "turns": [
+            {"input": "你刚才把文件写好了吗？", "status": "completed", "released_text": "写好了。",
+             "sent_messages": [{"role": "system", "content": "参考记录：" + receipt}], "turn_policy": {"mode": "conversation"}},
+            {"input": "今天下雨了。", "status": "completed", "released_text": "我这边也是，窗外正下着雨。",
+             "sent_messages": [{"role": "system", "content": "你是栖音。"}], "turn_policy": {"mode": "conversation"}},
+            {"input": "喵一个。", "status": "abstained", "released_text": ABSTENTION,
+             "sent_messages": [{"role": "system", "content": "你是栖音。"}]}]}]}
+        result = tool.recheck(report)
+        self.assertEqual((result["turns_checked"], result["turns_flagged"], result["by_kind"]),
+                         (2, 1, {"perception": 1}))
+        self.assertEqual(result["flagged"][0]["turn"], "F3#2")

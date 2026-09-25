@@ -214,6 +214,32 @@ class CeilingProbeTests(unittest.TestCase):
                           arms["arm-a"]["any_accept_at"]), (0.0, {"D": 0.5}, None, {"1": 0.0, "2": 0.0}))
         self.assertEqual(arms["original:qwen4b-q4-v5-r1"]["p_accept"], 1.0)
 
+    def test_blind_shows_empty_replies_and_never_backfills(self):
+        texts = iter(["", "乙", "丙"] * 3)
+
+        def server(request):
+            body = json.loads(request.content)
+            return httpx.Response(200, json={"choices": [{"message": {"content": next(texts)},
+                                                          "finish_reason": "stop"}]})
+        self.replay(server, label="silent", samples=3)
+        review = self.tool.blind([self.base / "probe-silent.json"], self.base / "r.json", self.base / "k.json",
+                                 per_arm=2, subset=None, include_original=False, seed=1)
+        key = json.loads((self.base / "k.json").read_text(encoding="utf-8"))["key"]
+        for item in review["items"]:
+            shown = {c["letter"]: c["text"] for c in item["candidates"]}
+            by_index = {entry["index"]: shown[letter] for letter, entry in key[item["id"]]["candidates"].items()}
+            self.assertEqual(by_index, {0: self.tool.EMPTY_REPLY, 1: "乙"})
+
+    def test_clock_and_state_ablations_remove_only_their_lines(self):
+        system = ("你是栖音（XIYIN）。\n当前状态（运行时估计，用来调语气，不用说出来）：空闲。\n"
+                  "当前本机时间：2026年9月24日，星期四，11:25（UTC-06:00）。\n"
+                  "这段会话上次有人说话：2026年9月24日 11:25，距现在不到两分钟。\n参考记录：[]")
+        messages, applied = self.tool.ablate([{"role": "system", "content": system},
+                                              {"role": "user", "content": "当前本机时间：随便"}], ("clock", "state_line"))
+        self.assertEqual(applied, ["clock", "state_line"])
+        self.assertEqual(messages[0]["content"], "你是栖音（XIYIN）。\n参考记录：[]")
+        self.assertEqual(messages[1]["content"], "当前本机时间：随便")
+
     def test_blind_refuses_mixed_contexts_and_tally_refuses_unknown_letters(self):
         self.replay(label="plain", samples=1)
         self.replay(label="ablated", samples=1, ablations=("tool_menu",))

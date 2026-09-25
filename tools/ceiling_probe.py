@@ -80,7 +80,11 @@ REVIEW_SUBSET = (
 # a measurement arm. Only lines named here; the runtime is not changed.
 ABLATIONS = {
     "tool_menu": re.compile(r"^已登记接口：[^\n]*(?:\n|$)", re.M),
+    # ceiling-01: every model read "9.11 和 9.9" as dates next to the clock line.
+    "clock": re.compile(r"^(?:当前本机时间：|这段会话上次有人说话：)[^\n]*(?:\n|$)", re.M),
+    "state_line": re.compile(r"^当前状态（运行时估计[^\n]*(?:\n|$)", re.M),
 }
+EMPTY_REPLY = "（空回复）"
 
 HARD_HINTS = ("invented_perception", "unreceipted_action", "assistant_frame", "servant_frame",
               "claims_911_bigger", "remembered_opener")
@@ -399,8 +403,13 @@ def blind(probe_paths, review_path, key_path, *, per_arm=4, subset=REVIEW_SUBSET
             if include_original and turn.get("original") and not any(
                     arm.startswith("original:") for arm, _, _ in group["candidates"]):
                 group["candidates"].append(("original:" + turn["source"], 0, turn["original"]))
-            texts = [sample["text"] for sample in turn["samples"] if not sample.get("error") and sample["text"]]
-            group["candidates"].extend((probe["label"], index, text) for index, text in enumerate(texts[:per_arm]))
+            # The first per_arm samples by seed order, never backfilled: an empty
+            # reply is shown as one (and can be judged unacceptable), so an arm
+            # gains nothing from silence. A transport error is not a reply and
+            # leaves its slot out.
+            group["candidates"].extend(
+                (probe["label"], index, sample["text"] or EMPTY_REPLY)
+                for index, sample in enumerate(turn["samples"][:per_arm]) if not sample.get("error"))
     rng = random.Random(seed)
     items, key = [], {}
     for number, ((source, turn_key), group) in enumerate(sorted(groups.items()), 1):

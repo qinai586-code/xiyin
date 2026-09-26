@@ -1,5 +1,7 @@
 # XIYIN 本机操作手册：ceiling-02 与 phase-b-01
 
+> **已被第 2 版取代：`XIYIN_Local_Operating_Procedure_v2_2026-09-26.md`**（一条命令后台运行，可交给 AI 执行）。
+
 日期：2026-09-26
 代码版本：`bfe72f7`（分支 `claude/brave-curie-l45uri-repair`）
 

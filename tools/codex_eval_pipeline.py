@@ -865,7 +865,7 @@ def stop(args) -> int:
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, creationflags=NO_WINDOW)
     else:
         import signal
-        os.kill(pid, signal.SIGINT)  # the job stops its server on the way out
+        os.kill(pid, signal.SIGTERM)  # a job turns this into KeyboardInterrupt and stops its server
     deadline = time.monotonic() + 60
     while pid_alive(pid) and time.monotonic() < deadline:
         time.sleep(1)
@@ -1050,6 +1050,13 @@ def main(argv=None):
     parser.add_argument("--allow-other-files", action="store_true",
                         help="run even when a file's sha256 differs from the recorded one (recorded, not hidden)")
     args = parser.parse_args(argv)
+    if not WINDOWS and args.job in ("all", "ceiling02", "phaseb01"):
+        import signal
+
+        def interrupted(*_):
+            raise KeyboardInterrupt
+        # "stop" sends SIGTERM; clean up as for Ctrl+C (SIGINT may be ignored in background jobs).
+        signal.signal(signal.SIGTERM, interrupted)
     if args.job in ("ceiling02", "phaseb01", "pack") and not args.out:
         parser.error(f"{args.job} needs --out")
     if args.job == "all":

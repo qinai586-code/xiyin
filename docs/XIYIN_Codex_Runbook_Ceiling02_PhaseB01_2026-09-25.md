@@ -228,3 +228,38 @@ B0: DEFERRED
 TRAINING: NOT_AUTHORIZED
 MERGE_STATUS: DO_NOT_MERGE
 ```
+
+## 8. 不用 Codex 的做法（2026-09-26 起推荐）
+
+跑的部分本来就是固定命令，不需要任何 AI。需要判断的部分交给 Claude：逐条核对 P8 标签和被拦候选、写报告。主理人只在 PowerShell 里贴命令，然后上传两个 zip。
+
+- 代码固定在提交 `bfe72f7`，从 GitHub 重新克隆到一个新目录 `run-bfe72f7`。
+- 模型、服务器和来源文件的核对，以及端口检查，都由流水线自己做。
+
+```powershell
+# 1-1 克隆（约 1 分钟；可能弹出 GitHub 登录）
+git clone --branch claude/brave-curie-l45uri-repair https://github.com/qinai586-code/xiyin.git C:\XIYIN\evidence\run-bfe72f7
+git -C C:\XIYIN\evidence\run-bfe72f7 checkout --detach bfe72f732808fe09b7688f39eb6a06291874ae16
+git -C C:\XIYIN\evidence\run-bfe72f7 log -1 --format=%h
+
+# 1-2 环境和单测（约 3 分钟；最后一行应为 OK）
+cd C:\XIYIN\evidence\run-bfe72f7
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.lock.txt
+.venv\Scripts\python.exe -m unittest discover -s tests -q
+
+# 2 ceiling02（约 3 小时）
+.venv\Scripts\python.exe tools\codex_eval_pipeline.py ceiling02 --out C:\XIYIN\evidence\ceiling-02-bfe72f7
+
+# 3 phaseb01（约 1 小时）
+.venv\Scripts\python.exe tools\codex_eval_pipeline.py phaseb01 --out C:\XIYIN\evidence\phase-b-01-bfe72f7
+
+# 4 打包（几秒）
+.venv\Scripts\python.exe tools\codex_eval_pipeline.py pack --out C:\XIYIN\evidence\ceiling-02-bfe72f7
+.venv\Scripts\python.exe tools\codex_eval_pipeline.py pack --out C:\XIYIN\evidence\phase-b-01-bfe72f7
+```
+
+上传给 Claude：`ceiling-02-bfe72f7.zip`、`phase-b-01-bfe72f7.zip`。
+`CEILING02_BLIND_REVIEW_ONLY.zip` 交给盲评的人。
+
+检查器是 Claude 写的，所以由 Claude 判断它的误拦，不算独立核对。为此，报告会列出每一条判定和理由，供主理人抽查。

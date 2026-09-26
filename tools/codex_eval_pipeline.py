@@ -1,8 +1,17 @@
 """One command per evaluation job, so the executor runs it instead of improvising it.
 
+    python tools\\codex_eval_pipeline.py all --detach     # both jobs, then packing, in the background
+    python tools\\codex_eval_pipeline.py status           # where it is
+    python tools\\codex_eval_pipeline.py stop             # stop it; "all --detach" again resumes
+
+"all" writes to <root>\\results-<commit>\\ (root: C:\\XIYIN\\evidence), naming every
+folder from the checked-out commit, so no path is typed by hand. With --detach it
+runs as a Windows scheduled task: closing the window, or ending an agent session,
+does not stop it; the machine is kept awake while it runs.
+
+The single jobs remain:
     python tools\\codex_eval_pipeline.py ceiling02 --out C:\\XIYIN\\evidence\\ceiling-02
     python tools\\codex_eval_pipeline.py phaseb01  --out C:\\XIYIN\\evidence\\phase-b-01
-    python tools\\codex_eval_pipeline.py status    --out <either>
     python tools\\codex_eval_pipeline.py pack      --out <either>
 
 ceiling02:
@@ -26,9 +35,10 @@ Resumable: every expensive step writes its own output and is skipped when that
 output exists, so an interruption loses at most the step in progress. Run the
 same command again. Analysis always reruns; it is cheap.
 
-Run it in an ordinary PowerShell window, not inside an agent session: a
-session abort or sandbox has killed long child processes before (ceiling-01
-interruption-01/02, WinError 5 in sandbox TEMP).
+Never run a long job as a child of an agent session: a session abort or
+sandbox has killed long child processes before (ceiling-01 interruption-01/02,
+WinError 5 in sandbox TEMP). "all --detach" hands it to the Task Scheduler, so
+an agent may start it and leave; without --detach, use an ordinary window.
 
 Measurement only. No runtime default changes: the hold is the harness flag.
 An existing server on the port is never killed; the job stops instead. No
@@ -72,6 +82,11 @@ EXPECTED_SHA256 = {
     "v4source": "8ed5815e21c26fb1ab21bb8e0d959f9ff652d975b1a5a365c16329801f7bde93",
 }
 HOST, PORT = "127.0.0.1", 8080
+WINDOWS = platform.system() == "Windows"
+DEFAULT_ROOT = r"C:\XIYIN\evidence"
+# Children never open a console window: a detached run has none, and a stray
+# window closed by hand would kill what runs in it.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if WINDOWS else 0
 ABLATIONS = ("clock", "tool_menu", "move", "state_line")
 MODELS = (("model4", "4b", "q4b-q4"), ("model9", "9b", "q9b-q4"))
 BASELINES = ("q4b-q4-v4src", "q4b-q8-v4src", "q9b-q4-v4src")
@@ -87,6 +102,36 @@ def server_flags() -> list[str]:
     return ["--host", HOST, "--port", str(PORT), "--alias", "xiyin", "--ctx-size", "4096", "--parallel", "1",
             "--n-gpu-layers", "999", "--jinja", "--chat-template-kwargs", '{"enable_thinking":false}',
             "--no-mmproj-auto"]
+
+
+def console_python() -> str:
+    """python.exe beside the running interpreter (a detached run is pythonw.exe itself)."""
+    candidate = Path(sys.executable).with_name("python.exe")
+    return str(candidate) if WINDOWS and candidate.exists() else sys.executable
+
+
+def git(*arguments) -> str:
+    return subprocess.run(["git", *arguments], cwd=ROOT, capture_output=True, text=True,
+                          creationflags=NO_WINDOW).stdout.strip()
+
+
+def head_commit() -> str:
+    return git("rev-parse", "HEAD")
+
+
+class KeepAwake:
+    """Keep Windows from sleeping while a run is in progress (not the display; not a closed lid)."""
+
+    def __enter__(self):
+        if WINDOWS:
+            import ctypes
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000001)  # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+        return self
+
+    def __exit__(self, *exc):
+        if WINDOWS:
+            import ctypes
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)
 
 
 def _load(name, rel):
@@ -150,7 +195,7 @@ def server_healthy() -> bool:
 
 
 def pid_alive(pid: int) -> bool:
-    if platform.system() == "Windows":
+    if WINDOWS:
         # os.kill(pid, 0) would terminate the process on Windows; ask instead.
         import ctypes
         kernel = ctypes.windll.kernel32
@@ -167,7 +212,10 @@ def pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-    return True
+    try:  # an exited child nobody has reaped yet is not running
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return True
 
 
 class GpuSampler:
@@ -186,7 +234,8 @@ class GpuSampler:
         while not self._stop.is_set():
             try:
                 value = subprocess.run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-                                       capture_output=True, text=True, timeout=10).stdout.split()
+                                       capture_output=True, text=True, timeout=10,
+                                       creationflags=NO_WINDOW).stdout.split()
                 if value:
                     self.peak = max(self.peak or 0, int(value[0]))
             except (OSError, ValueError, subprocess.SubprocessError):
@@ -210,13 +259,13 @@ class ModelServer:
         if port_busy():
             raise RuntimeError(f"Something already listens on {HOST}:{PORT}. Stop it yourself first; "
                                "this pipeline never stops a process it did not start.")
-        command = [sys.executable, self.server] if self.server.endswith(".py") else [self.server]
+        command = [console_python(), self.server] if self.server.endswith(".py") else [self.server]
         command += ["--model", self.model, *server_flags()]
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log = self.log_path.open("ab")
         self._log.write(f"\n=== {_now()} {json.dumps(command, ensure_ascii=False)}\n".encode("utf-8"))
         self._log.flush()
-        flags = subprocess.CREATE_NEW_PROCESS_GROUP if platform.system() == "Windows" else 0
+        flags = (subprocess.CREATE_NEW_PROCESS_GROUP | NO_WINDOW) if WINDOWS else 0
         self.process = subprocess.Popen(command, stdout=self._log, stderr=subprocess.STDOUT, creationflags=flags)
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
@@ -244,9 +293,7 @@ class ModelServer:
 def preflight(out: Path, args, *, extra: dict, checks=()) -> dict:
     """Hashes of the server, models and sources; stops on any mismatch or modified tracked file."""
     path = out / "preflight.json"
-    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
-    dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=ROOT,
-                           capture_output=True, text=True).stdout.strip()
+    commit, dirty = head_commit(), git("status", "--porcelain", "--untracked-files=no")
     if path.exists():
         # A resumed job must be the same code, unmodified: never mix evidence from two versions.
         record = read_json(path)
@@ -620,8 +667,9 @@ def phaseb01(args):
     tests = out / "unit-tests.json"
     if not tests.exists():
         log(out, "unit tests (the whole suite, about a minute)")
-        run = subprocess.run([sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-q"], cwd=ROOT,
-                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600)
+        run = subprocess.run([console_python(), "-B", "-m", "unittest", "discover", "-s", "tests", "-q"], cwd=ROOT,
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600,
+                             creationflags=NO_WINDOW)
         result = {"exit_code": run.returncode, "tail": (run.stderr or run.stdout)[-3000:]}
         if run.returncode:
             write_json(out / "unit-tests-FAILED.json", result)
@@ -644,7 +692,7 @@ def phaseb01(args):
                 target = out / label / "dialogue.json"
                 partial = target.with_name("dialogue.json.partial")
                 target.parent.mkdir(parents=True, exist_ok=True)
-                command = [sys.executable, "-B", "tools/acceptance_dialogue.py", "--label", label,
+                command = [console_python(), "-B", "tools/acceptance_dialogue.py", "--label", label,
                            "--persona-projection", "v4", "--model-file", getattr(args, model_key),
                            "--out", str(partial)]
                 if hold:
@@ -654,7 +702,8 @@ def phaseb01(args):
                 with (out / "logs" / f"{label}.log").open("a", encoding="utf-8") as stream:
                     stream.write(f"\n=== {_now()} {json.dumps(command, ensure_ascii=False)}\n")
                     stream.flush()
-                    code = subprocess.run(command, cwd=ROOT, env=env, stdout=stream, stderr=subprocess.STDOUT).returncode
+                    code = subprocess.run(command, cwd=ROOT, env=env, stdout=stream, stderr=subprocess.STDOUT,
+                                          creationflags=NO_WINDOW).returncode
                 exits = out / "logs" / f"{label}.exit.json"
                 history = read_json(exits) if exits.exists() else []
                 write_json(exits, [*history, {"utc": _now(), "exit_code": code,
@@ -753,18 +802,175 @@ def _record_run(out: Path, **fields) -> None:
     write_json(path, history)
 
 
-def status(args) -> int:
-    path = Path(args.out) / "STATUS.json"
+def _status_line(out: Path) -> tuple[str, int]:
+    path = out / "STATUS.json"
     if not path.exists():
-        print("NOT_STARTED")
-        return 3
+        return "NOT_STARTED", 3
     record = read_json(path)
     state = record.get("state")
     if state == "running" and not pid_alive(int(record.get("pid") or 0)):
-        state = "stopped (the process is gone without finishing; run the same command again)"
-    print(f"{state} | {record.get('job')} | {record.get('step')} | updated {record.get('updated_utc')}"
-          + (f" | error: {record['error']}" if record.get("error") else ""))
+        state = "stopped (the process is gone without finishing; start it again to resume)"
+    line = (f"{state} | {record.get('job')} | {record.get('step')} | updated {record.get('updated_utc')}"
+            + (f" | error: {record['error']}" if record.get("error") else ""))
+    return line, {"done": 0, "running": 2}.get(state, 1)
+
+
+def results_dir(args) -> Path:
+    return Path(args.root) / f"results-{head_commit()[:7]}"
+
+
+def _running_all(results: Path) -> int:
+    path = results / "ALL-STATUS.json"
+    record = read_json(path) if path.exists() else {}
+    pid = int(record.get("pid") or 0)
+    return pid if record.get("state") == "running" and pid and pid != os.getpid() and pid_alive(pid) else 0
+
+
+def status(args) -> int:
+    if args.out:
+        line, code = _status_line(Path(args.out))
+        print(line)
+        return code
+    results = results_dir(args)
+    path = results / "ALL-STATUS.json"
+    if not path.exists():
+        print(f"NOT_STARTED | {results}")
+        return 3
+    record = read_json(path)
+    state = record.get("state")
+    if state == "running" and not _running_all(results):
+        state = "stopped (start it again to resume)"
+    print(f"{state} | {results}")
+    short = results.name.split("-", 1)[1]
+    for name in ("ceiling-02", "phase-b-01"):
+        print(f"  {name}: {_status_line(results / f'{name}-{short}')[0]}")
+    if state == "done":
+        for item in sorted(results.glob("*.zip")):
+            print(f"  zip: {item}")
     return {"done": 0, "running": 2}.get(state, 1)
+
+
+def stop(args) -> int:
+    """Stop a running job and everything it started; starting it again resumes."""
+    if args.out:
+        path = Path(args.out) / "STATUS.json"
+        pid = int((read_json(path) if path.exists() else {}).get("pid") or 0)
+    else:
+        pid = _running_all(results_dir(args))
+    if not pid or pid == os.getpid() or not pid_alive(pid):
+        print("nothing is running")
+        return 0
+    if WINDOWS:
+        # /T: the whole tree, so the llama-server and harness it started go too.
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, creationflags=NO_WINDOW)
+    else:
+        import signal
+        os.kill(pid, signal.SIGINT)  # the job stops its server on the way out
+    deadline = time.monotonic() + 60
+    while pid_alive(pid) and time.monotonic() < deadline:
+        time.sleep(1)
+    print("still running; try again" if pid_alive(pid) else "stopped; start it again to resume")
+    return 1 if pid_alive(pid) else 0
+
+
+def run_all(args) -> int:
+    """Both jobs in order, then packing. Folder names come from the checked-out commit."""
+    results = results_dir(args)
+    results.mkdir(parents=True, exist_ok=True)
+    if sys.stdout is None:  # started without a console (the scheduled task): keep what it prints
+        sys.stdout = sys.stderr = (results / "console.log").open("a", encoding="utf-8", buffering=1)
+    if _running_all(results):
+        raise SystemExit(f"already running as process {_running_all(results)}")
+    short = results.name.split("-", 1)[1]
+    state_path = results / "ALL-STATUS.json"
+    record = {"state": "running", "pid": os.getpid(), "started_utc": _now(), "jobs": {}}
+    write_json(state_path, record)
+    with KeepAwake():
+        for job, name in ((ceiling02, "ceiling-02"), (phaseb01, "phase-b-01")):
+            sub = argparse.Namespace(**{**vars(args), "job": job.__name__, "out": str(results / f"{name}-{short}")})
+            try:
+                outcome = "done" if run_job(job, sub) == 0 else "interrupted"
+            except SystemExit as exc:
+                outcome = f"failed: {exc.code}"
+            except Exception as exc:  # recorded in that job's STATUS.json with its traceback
+                outcome = f"failed: {type(exc).__name__}: {exc}"
+            record["jobs"][name] = outcome
+            write_json(state_path, {**record, "updated_utc": _now()})
+            if outcome == "interrupted":
+                break
+        for name, outcome in record["jobs"].items():
+            if outcome == "done":
+                pack(argparse.Namespace(out=str(results / f"{name}-{short}")))
+    done = [record["jobs"].get(name) for name in ("ceiling-02", "phase-b-01")] == ["done", "done"]
+    record.update(state="done" if done else "incomplete", ended_utc=_now())
+    write_json(state_path, record)
+    print(f"all {'done' if done else 'incomplete'}: {record['jobs']} -> {results}")
+    return 0 if done else 1
+
+
+def task_xml(command: str, arguments: str, workdir: str) -> str:
+    """A scheduled task for the current user: runs on battery, no triggers, 12-hour limit."""
+    from xml.sax.saxutils import escape
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>XIYIN evaluation (measurement only)</Description></RegistrationInfo>
+  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <ExecutionTimeLimit>PT12H</ExecutionTimeLimit>
+    <Priority>5</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{escape(command)}</Command>
+      <Arguments>{escape(arguments)}</Arguments>
+      <WorkingDirectory>{escape(workdir)}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def detach(args) -> int:
+    """Start "all" as a scheduled task, so no window or agent session holds it; confirm it started."""
+    if not WINDOWS:
+        raise SystemExit("--detach uses the Windows Task Scheduler; elsewhere run 'all' without it")
+    results = results_dir(args)
+    results.mkdir(parents=True, exist_ok=True)
+    if _running_all(results):
+        print(f"already running as process {_running_all(results)}; check it with: status")
+        return 0
+    windowless = Path(sys.executable).with_name("pythonw.exe")
+    arguments = [str(Path(__file__).resolve()), "all", "--root", str(args.root)]
+    arguments += [f"--{name}={getattr(args, name)}" for name, value in DEFAULTS.items() if getattr(args, name) != value]
+    arguments += ["--allow-other-files"] if args.allow_other_files else []
+    xml_path = results / "task.xml"
+    xml_path.write_text(task_xml(str(windowless if windowless.exists() else sys.executable),
+                                 subprocess.list2cmdline(arguments), str(ROOT)), encoding="utf-16")
+    name, before = f"XIYIN-eval-{results.name.split('-', 1)[1]}", _now()
+    for command in (["schtasks", "/Create", "/TN", name, "/XML", str(xml_path), "/F"], ["schtasks", "/Run", "/TN", name]):
+        run = subprocess.run(command, capture_output=True, text=True, errors="replace", creationflags=NO_WINDOW)
+        if run.returncode:
+            raise SystemExit(f"Task Scheduler refused ({command[1]}): {(run.stderr or run.stdout).strip()}\n"
+                             "Run the same command without --detach instead, and keep that window open.")
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        path = results / "ALL-STATUS.json"
+        record = read_json(path) if path.exists() else {}
+        if record.get("started_utc", "") >= before and record.get("pid"):
+            print(f"started in the background as task {name} (process {record['pid']}).\n"
+                  f"This window can be closed. Results: {results}\n"
+                  "Progress: .venv\\Scripts\\python.exe tools\\codex_eval_pipeline.py status")
+            return 0
+        time.sleep(2)
+    raise SystemExit(f"task {name} was created but did not start within 90s; see {results / 'console.log'}.\n"
+                     "Run the same command without --detach instead, and keep that window open.")
 
 
 def pack(args) -> int:
@@ -835,15 +1041,23 @@ def run_job(job, args) -> int:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("job", choices=("ceiling02", "phaseb01", "status", "pack"))
-    parser.add_argument("--out", required=True)
+    parser.add_argument("job", choices=("all", "status", "stop", "ceiling02", "phaseb01", "pack"))
+    parser.add_argument("--out", help="one job's folder (ceiling02, phaseb01, pack; optional for status, stop)")
+    parser.add_argument("--root", default=DEFAULT_ROOT, help="where results-<commit> is written (all, status, stop)")
+    parser.add_argument("--detach", action="store_true", help="all: run as a Windows scheduled task")
     for name, value in DEFAULTS.items():
         parser.add_argument("--" + name, default=value)
     parser.add_argument("--allow-other-files", action="store_true",
                         help="run even when a file's sha256 differs from the recorded one (recorded, not hidden)")
     args = parser.parse_args(argv)
+    if args.job in ("ceiling02", "phaseb01", "pack") and not args.out:
+        parser.error(f"{args.job} needs --out")
+    if args.job == "all":
+        return detach(args) if args.detach else run_all(args)
     if args.job == "status":
         return status(args)
+    if args.job == "stop":
+        return stop(args)
     if args.job == "pack":
         return pack(args)
     return run_job(ceiling02 if args.job == "ceiling02" else phaseb01, args)

@@ -178,6 +178,21 @@ class ServerAndJobTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "new --out folder"):
                 pipeline.preflight(Path(directory), None, extra={})
 
+    def test_stop_ends_a_running_job(self):
+        with tempfile.TemporaryDirectory() as directory:
+            other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+            try:
+                (Path(directory) / "STATUS.json").write_text(json.dumps({"pid": other.pid, "state": "running"}),
+                                                             encoding="utf-8")
+                args = pipeline.argparse.Namespace(out=directory, root=directory)
+                with mock.patch("builtins.print"):
+                    self.assertEqual(pipeline.stop(args), 0)
+                self.assertIsNotNone(other.wait(timeout=30))
+            finally:
+                if other.poll() is None:
+                    other.kill()
+                    other.wait()
+
     def test_a_failed_job_is_recorded_and_releases_its_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             args = pipeline.argparse.Namespace(out=directory, job="ceiling02")
@@ -189,6 +204,45 @@ class ServerAndJobTests(unittest.TestCase):
             status = json.loads((Path(directory) / "STATUS.json").read_text(encoding="utf-8"))
             self.assertEqual((status["state"], status["error"]), ("failed", "preflight failed: model4 missing"))
             self.assertFalse((Path(directory) / "RUNNING.lock").exists())
+
+
+class AllInOneTests(unittest.TestCase):
+    def test_both_jobs_run_in_order_a_failure_does_not_stop_the_next_and_finished_ones_are_packed(self):
+        order = []
+
+        def failing(args):
+            order.append("ceiling02")
+            raise SystemExit("preflight failed: model9 missing")
+
+        def working(args):
+            order.append("phaseb01")
+            (Path(args.out) / "REPORT-DRAFT.md").write_text("ok", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(pipeline, "head_commit", return_value="abcdef1234"), \
+                mock.patch.object(pipeline, "ceiling02", failing), mock.patch.object(pipeline, "phaseb01", working), \
+                mock.patch("builtins.print"):
+            args = pipeline.argparse.Namespace(root=directory, out=None, detach=False, allow_other_files=False,
+                                               **pipeline.DEFAULTS)
+            self.assertEqual(pipeline.run_all(args), 1)
+            results = Path(directory) / "results-abcdef1"
+            record = json.loads((results / "ALL-STATUS.json").read_text(encoding="utf-8"))
+            self.assertEqual(order, ["ceiling02", "phaseb01"])
+            self.assertEqual(record["state"], "incomplete")
+            self.assertEqual(record["jobs"], {"ceiling-02": "failed: preflight failed: model9 missing",
+                                              "phase-b-01": "done"})
+            self.assertEqual(sorted(p.name for p in results.glob("*.zip")), ["phase-b-01-abcdef1.zip"])
+            self.assertEqual(pipeline.status(args), 1)
+
+    def test_the_scheduled_task_runs_on_battery_without_triggers(self):
+        from xml.etree import ElementTree
+        text = pipeline.task_xml(r"C:\x\pythonw.exe", '"C:\\a b\\tool.py" all --root C:\\r & more', r"C:\x")
+        root = ElementTree.fromstring(text.split("?>", 1)[1])
+        ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+        self.assertEqual(root.find("t:Settings/t:DisallowStartIfOnBatteries", ns).text, "false")
+        self.assertEqual(root.find("t:Settings/t:StopIfGoingOnBatteries", ns).text, "false")
+        self.assertIsNone(root.find("t:Triggers", ns))
+        self.assertTrue(root.find("t:Actions/t:Exec/t:Arguments", ns).text.endswith("& more"))
 
 
 if __name__ == "__main__":

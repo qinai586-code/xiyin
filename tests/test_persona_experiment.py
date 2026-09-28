@@ -221,7 +221,9 @@ class HarnessTests(unittest.TestCase):
         self.assertFalse(set(ids) & {case["id"] for case in CASES})
         self.assertEqual(sum(len(case["turns"]) for case in EVERYDAY_CASES), 15)
         for case in EVERYDAY_CASES:
-            self.assertTrue(case["failure"])
+            # The keys run() indexes directly; "note" is optional (a missing one
+            # stopped the first Windows persona01 run with KeyError: 'note').
+            self.assertTrue(case["id"] and case["failure"] and case["turns"])
             for turn in case["turns"]:
                 self.assertTrue(turn["text"] and turn["read"], case["id"])
 

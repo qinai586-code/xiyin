@@ -754,7 +754,7 @@ async def run(label, out_path, case_filter, persona_projection=None, model_file=
                         continue
                     session = case["id"][:60]
                     entry = {"id": case["id"], "failure": case["failure"],
-                             "note": case["note"], "setup": None, "turns": []}
+                             "note": case.get("note", ""), "setup": None, "turns": []}
                     if case.get("setup") == "verified_write":
                         entry["setup"] = await _setup_verified_write(runtime, workspace, session)
                     for spec in case["turns"]:

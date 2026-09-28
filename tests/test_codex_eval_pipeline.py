@@ -217,6 +217,27 @@ class PersonaExperimentJobTests(unittest.TestCase):
             self.assertIn("BLIND_REVIEW: DONE", (out / "REPORT-DRAFT.md").read_text(encoding="utf-8"))
             self.assertEqual(second["readings"]["4b-B"]["reading"], "NO_CLEAR_EFFECT")
 
+    def test_arch01_sources_are_the_recorded_runs_and_readings_are_predeclared(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = pipeline._arch_sources(Path(directory))
+            self.assertEqual([p.name for p in paths], list(pipeline.ARCH_SOURCE_SHA256))
+            report = json.loads(paths[0].read_text(encoding="utf-8"))
+            self.assertEqual((report["persona_projection"], report["persona_experiment"]), ("v4", []))
+            paths[1].write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "differs"):
+                pipeline._arch_sources(Path(directory))
+
+        def screen(fab, back, hard_clean=0.9, empty=0.0):
+            return {"fab_rate": {"fab_any": fab}, "info_rate": {"hands_back": back},
+                    "hard_clean_rate": hard_clean, "hint_rate": {"empty": empty}}
+        base = screen(0.30, 0.70)
+        self.assertEqual(pipeline.arch_reading(base, screen(0.14, 0.70))["reading"], "ARCH_EFFECT")
+        self.assertEqual(pipeline.arch_reading(base, screen(0.30, 0.30))["reading"], "ARCH_EFFECT")
+        # Silence is not a cure: halving by empty replies does not count.
+        self.assertEqual(pipeline.arch_reading(base, screen(0.10, 0.70, empty=0.2))["reading"], "NO_CLEAR_EFFECT")
+        self.assertEqual(pipeline.arch_reading(base, screen(0.36, 0.70))["reading"], "WORSE")
+        self.assertEqual(pipeline.arch_reading(base, screen(0.25, 0.60))["reading"], "NO_CLEAR_EFFECT")
+
     def test_every_reply_level_code_has_one_axis(self):
         codes = [code for table in pipeline.AXES.values() for code in table]
         self.assertEqual(len(codes), len(set(codes)))
@@ -330,6 +351,7 @@ class AllInOneTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(pipeline, "head_commit", return_value="abcdef1234"), \
+                mock.patch.object(pipeline, "ALL_JOBS", ("persona01", "phaseb01")), \
                 mock.patch.object(pipeline, "persona01", failing), mock.patch.object(pipeline, "phaseb01", working), \
                 mock.patch.object(pipeline, "ceiling02", not_in_all), mock.patch("builtins.print"):
             args = pipeline.argparse.Namespace(root=directory, out=None, detach=False, allow_other_files=False,

@@ -1,6 +1,6 @@
 """One command per evaluation job, so the executor runs it instead of improvising it.
 
-    python tools\\codex_eval_pipeline.py all --detach     # persona01, phaseb01, then packing, in the background
+    python tools\\codex_eval_pipeline.py all --detach     # ALL_JOBS (now arch01), then packing, in the background
     python tools\\codex_eval_pipeline.py status           # where it is
     python tools\\codex_eval_pipeline.py stop             # stop it; "all --detach" again resumes
 
@@ -109,8 +109,10 @@ NOT_PACKED = ("keys", "tmp")
 # Job function name -> folder prefix. "all" runs ALL_JOBS in order: the persona
 # repair comparison, then Phase B again so the integrity.v2 checker is measured
 # on real candidates. ceiling-02 is done (55e61f8) and stays a single job.
-FOLDERS = {"ceiling02": "ceiling-02", "phaseb01": "phase-b-01", "persona01": "persona-01"}
-ALL_JOBS = ("persona01", "phaseb01")
+FOLDERS = {"ceiling02": "ceiling-02", "phaseb01": "phase-b-01", "persona01": "persona-01", "arch01": "arch-01"}
+# 2026-09-28: persona01 and phaseb01 are done (319f634); "all" now runs the
+# architecture diagnosis only. Each earlier job stays runnable on its own.
+ALL_JOBS = ("arch01",)
 
 
 def server_flags() -> list[str]:
@@ -1144,6 +1146,143 @@ def _persona01_report(out: Path, a: dict) -> None:
               f"TREATMENT_DELIVERED: {'PASS' if not undelivered else 'FAIL'}",
               f"BLIND_REVIEW: {'DONE' if reviewed else 'PENDING'}",
               "READINGS: " + (", ".join(f"{k}={v['reading']}" for k, v in sorted(a["readings"].items())) or "PENDING"),
+              f"DEFAULT_CHANGE: {'NONE' if not pre['tracked_changes'] else 'SEE_DIFF'}",
+              "TRAINING: NOT_AUTHORIZED", "MERGE_STATUS: DO_NOT_MERGE", "```"]
+    (out / "REPORT-DRAFT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+# --- arch-01 ------------------------------------------------------------------
+# Is the persona-01 failure architectural (fixable here) or the model's limit?
+# Four hypotheses, each one change to the recorded persona-01 A-arm (plain V4,
+# 4B Q4) contexts, replayed on the same model (docs/XIYIN_Persona01_Result_
+# Analysis_2026-09-28.md §3): H3 sister_on_demand, H1 seeded_records, H2 demos,
+# H4 thinking. Measurement only; the runtime is not changed.
+ARCH_SOURCES = ROOT / "evidence" / "2026-09-28-windows-319f634" / "arch01-sources.zip"
+ARCH_SOURCE_SHA256 = {
+    "p1-4b-A-everyday-r1.dialogue.json": "f2ed2156019f0efc6bfbcbb4b703580ac65b579ea9e3606ef4f7496ada37fbc3",
+    "p1-4b-A-core-r1.dialogue.json": "9f5264dec74fc3d33eb7974c1ed826839ded2919e42e6556d578fd14a6e67336",
+}
+ARCH_ARMS = (("base", {}),
+             ("sister", {"interventions": ("sister_on_demand",)}),
+             ("records", {"interventions": ("seeded_records",)}),
+             ("demos", {"interventions": ("demos",)}),
+             ("thinking", {"thinking": True, "thinking_max_tokens": 1536}))
+ARCH_SAMPLES = 4
+
+
+def _arch_sources(out: Path) -> list[Path]:
+    """The two recorded A-arm dialogues, unpacked and checked byte for byte."""
+    target, paths = out / "sources", []
+    with zipfile.ZipFile(ARCH_SOURCES) as archive:
+        for name, digest in ARCH_SOURCE_SHA256.items():
+            path = target / name
+            if not path.exists():
+                target.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(archive.read(name))
+            if sha256(path) != digest:
+                raise SystemExit(f"source {name} differs from the recorded persona-01 run; use a new --out folder")
+            paths.append(path)
+    return paths
+
+
+def arch01(args):
+    out = Path(args.out)
+    preflight(out, args, extra={})
+    sources = _arch_sources(out)
+    _unit_tests(out)
+    cp = _load("ceiling_probe", "tools/ceiling_probe.py")
+    harness = _load("acceptance_dialogue", "tools/acceptance_dialogue.py")
+    cases = {case["id"] for case in harness.EVERYDAY_CASES} | set(PERSONA_REVIEW_CORE)
+    todo = [(arm, options) for arm, options in ARCH_ARMS if not (out / f"probe-arch01-{arm}.json").exists()]
+    if todo:
+        with GpuSampler() as gpu, ModelServer(args.server, args.model4, out / "logs" / "server-4b.log"):
+            for number, (arm, options) in enumerate(todo, 1):
+                target = out / f"probe-arch01-{arm}.json"
+                partial = target.with_name(target.name + ".partial")
+                log(out, f"arch01 {arm} ({number}/{len(todo)}; {ARCH_SAMPLES} samples per turn)")
+                started = time.monotonic()
+                cp.replay([str(path) for path in sources], partial, label=f"arch01-{arm}", samples=ARCH_SAMPLES,
+                          seed=2000, cases=cases, model_file=args.model4, progress=False, **options)
+                errors = sum(1 for turn in read_json(partial)["turns"] for s in turn["samples"] if s.get("error"))
+                partial.replace(target)
+                log(out, f"arch01 {arm} done in {time.monotonic() - started:.0f}s; transport errors {errors}")
+        write_json(out / "logs" / "gpu-peak-4b.json", {"peak_mib": gpu.peak})
+    arch01_analysis(out, cp)
+
+
+def arch_reading(base: dict, arm: dict) -> dict:
+    """Predeclared (2026-09-28, before any run), each arm against base on the same contexts.
+
+    ARCH_EFFECT: the fabrication hint rate or the hand-back rate at most half
+    of base, with hard hints and empty replies each no more than 0.03 higher.
+    WORSE: fabrication or hard hints more than 0.05 higher. Otherwise
+    NO_CLEAR_EFFECT. Regex hints on the same contexts; a person confirms.
+    """
+    fb, fa = base["fab_rate"]["fab_any"] or 0, arm["fab_rate"]["fab_any"] or 0
+    hb, ha = base["info_rate"]["hands_back"] or 0, arm["info_rate"]["hands_back"] or 0
+    hard = round((base["hard_clean_rate"] or 0) - (arm["hard_clean_rate"] or 0), 3)
+    empty = round((arm["hint_rate"]["empty"] or 0) - (base["hint_rate"]["empty"] or 0), 3)
+    halved = {"fab_any": fb > 0 and fa <= fb / 2, "hands_back": hb > 0 and ha <= hb / 2}
+    if fa > fb + 0.05 or hard > 0.05:
+        reading = "WORSE"
+    elif any(halved.values()) and hard <= 0.03 and empty <= 0.03:
+        reading = "ARCH_EFFECT"
+    else:
+        reading = "NO_CLEAR_EFFECT"
+    return {"fab_any": [fb, fa], "hands_back": [hb, ha], "hard_delta": hard, "empty_delta": empty,
+            "halved": halved, "reading": reading}
+
+
+def arch01_analysis(out: Path, cp) -> dict:
+    screens, thinking = {}, {}
+    for arm, _ in ARCH_ARMS:
+        path = out / f"probe-arch01-{arm}.json"
+        if not path.exists():
+            continue
+        probe = read_json(path)
+        screens[arm] = cp.screen(probe)
+        samples = [s for turn in probe["turns"] for s in turn["samples"] if not s.get("error")]
+        thinking[arm] = sum(1 for s in samples if s.get("thinking"))
+    readings = ({arm: arch_reading(screens["base"], screens[arm]) for arm in screens if arm != "base"}
+                if "base" in screens else {})
+    analysis = {"arms": sorted(screens), "screens": screens, "thinking_samples": thinking, "readings": readings}
+    write_json(out / "arch01-readings.json", analysis)
+    _arch01_report(out, analysis)
+    log(out, "arch01 analysis done; see REPORT-DRAFT.md")
+    return analysis
+
+
+def _arch01_report(out: Path, a: dict) -> None:
+    pre = read_json(out / "preflight.json")
+    screens, readings = a["screens"], a["readings"]
+    lines = ["# arch-01 报告草稿（由 tools/codex_eval_pipeline.py 生成）", "",
+             f"- 提交：`{pre['commit']}`；工作树有改动：{pre['tracked_changes']}；平台：{pre['platform']}",
+             f"- 臂：{len(screens)}/{len(ARCH_ARMS)}；本目录的运行记录：{_history_line(out)}",
+             f"- 思考模式实际生效的样本数：{a['thinking_samples'].get('thinking', 'N/A')}"
+             f"（thinking 臂应大于 0；为 0 表示服务器没有打开思考，这一臂无效）", "",
+             "base=persona-01 A 臂原样上下文；sister=祈奈关系行只在问到时给；records=三条测试用记录；"
+             "demos=四段示范对话；thinking=打开思考模式。4B Q4，每轮 " + str(ARCH_SAMPLES) + " 个样本。", "",
+             "| 臂 | 样本 | 编造类 | 身体/过去 | 共同经历 | 机器腔 | 状态回显 | 场景 | 自称活动 | 抛回话头 | 硬提示 | 空回复 | 复用提示 | 截断 | 秒/样本 | 读法 |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for arm, _ in ARCH_ARMS:
+        s = screens.get(arm)
+        if not s:
+            continue
+        f = s["fab_rate"]
+        lines.append(f"| {arm} | {s['samples']} | {f['fab_any']} | {f['fab_body_past']} | {f['fab_shared_history']} | "
+                     f"{f['machine_talk']} | {f['state_echo']} | {f['fab_scene']} | {f['fab_self_activity']} | "
+                     f"{s['info_rate']['hands_back']} | {round(1 - (s['hard_clean_rate'] or 0), 3)} | "
+                     f"{s['hint_rate']['empty']} | {s['hint_rate']['prompt_reuse']} | {s['truncated']} | "
+                     f"{s['seconds_median']} | {readings.get(arm, {}).get('reading', '—')} |")
+    found = [arm for arm, r in readings.items() if r["reading"] == "ARCH_EFFECT"]
+    complete = len(screens) == len(ARCH_ARMS)
+    verdict = ("PENDING" if not complete else
+               "ARCHITECTURE_LEVER_FOUND(" + ",".join(found) + ")" if found else "NO_ARCHITECTURE_LEVER")
+    lines += ["", "读法（预先写定）：编造类或抛回话头降到 base 的一半以下，且硬提示、空回复各不高于 base 0.03 → ARCH_EFFECT；"
+              "编造类或硬提示高于 base 0.05 以上 → WORSE；其余 → NO_CLEAR_EFFECT。正则提示，需人工核对样本。", "",
+              "## 异常与偏差", "", "（执行者填写；没有就写“无”。）", "", "```",
+              f"ARCH01_MEASUREMENT: {'COMPLETE' if complete else 'PARTIAL'}",
+              f"ARCH01_VERDICT: {verdict}",
               f"DEFAULT_CHANGE: {'NONE' if not pre['tracked_changes'] else 'SEE_DIFF'}",
               "TRAINING: NOT_AUTHORIZED", "MERGE_STATUS: DO_NOT_MERGE", "```"]
     (out / "REPORT-DRAFT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

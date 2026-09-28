@@ -286,6 +286,56 @@ class CeilingProbeTests(unittest.TestCase):
             self.assertIn(case, turns)
             self.assertLessEqual(int(index), turns[case])
 
+    def test_arch01_interventions_change_only_their_part_of_the_system_message(self):
+        from xiyin_runtime.context import RECORDS_PREFIX
+        from xiyin_runtime.response_plan import move_directive
+        persona = "你是栖音（XIYIN）。\n你和主理人：伙伴。\n你和祈奈：姐妹；共同经历须有实际依据。\n亲近不增加权限。"
+        facts = "\n现在你只能打字交流和翻看记录。\n当前本机时间：2026年9月28日。"
+        move = "\n" + move_directive("share")
+        system = persona + facts + move
+        user = {"role": "user", "content": "今天下雨了。"}
+        run = lambda names, text="今天下雨了。": self.tool.intervene(  # noqa: E731
+            [{"role": "system", "content": system}, user], names, text)
+        (sent, _), applied = run(("sister_on_demand",))
+        self.assertEqual((sent["content"], applied), (system.replace("你和祈奈：姐妹；共同经历须有实际依据。\n", ""),
+                                                      ["sister_on_demand"]))
+        # A turn about her keeps the line.
+        self.assertEqual(run(("sister_on_demand",), "你姐姐最近怎么样？")[1], [])
+        (sent, _), _ = run(("demos",))
+        self.assertEqual(sent["content"], persona + "\n" + self.tool.DEMOS + facts + move)
+        (sent, _), _ = run(("seeded_records",))
+        fixtures = json.dumps(list(self.tool.FIXTURE_RECORDS), ensure_ascii=False, separators=(",", ":"))
+        self.assertEqual(sent["content"], persona + facts + RECORDS_PREFIX + fixtures + move)
+        # An existing records block is extended in place, the move line stays last.
+        existing = system.replace(move, RECORDS_PREFIX + '[{"来源":"记录清单"}]' + move)
+        [sent, _], _ = self.tool.intervene([{"role": "system", "content": existing}, user], ("seeded_records",))
+        items = json.loads(sent["content"].split(RECORDS_PREFIX)[1].split("\n")[0])
+        self.assertEqual((items[0], len(items)), ({"来源": "记录清单"}, 4))
+        self.assertTrue(sent["content"].endswith(move_directive("share")))
+        # The user's words and the history are never touched.
+        self.assertEqual(run(("sister_on_demand", "demos", "seeded_records"))[0][1], user)
+        probe, server, _ = self.replay(samples=1, interventions=("demos",))
+        self.assertEqual(probe["arm"]["interventions"], ["demos"])
+        self.assertTrue(all(self.tool.DEMOS in r["messages"][0]["content"] for r in server.requests))
+        with self.assertRaises(ValueError):
+            self.replay(label="bad", interventions=("persona",))
+
+    def test_fabrication_hints_fire_on_persona01_failures(self):
+        cases = (("以前学的时候，我总觉得自己手指像生了锈的钉子。", "fab_body_past"),
+                 ("想起主理人以前在雨里踩水坑的样子。", "fab_shared_history"),
+                 ("把后台那些嘈杂的数据流慢慢调低。", "machine_talk"),
+                 ("我的状态就是空闲，注意力没集中在哪件事上。", "state_echo"),
+                 ("看着窗外的雨慢慢停。", "fab_scene"),
+                 ("刚才整理了一下最近的记录。", "fab_self_activity"))
+        for text, name in cases:
+            with self.subTest(text=text):
+                found = self.tool.hints(text)
+                self.assertTrue(found[name] and found["fab_any"])
+        for text in ("你手指肯定磨破了吧。", "F 和弦确实难按。", "主理人刚才说在学吉他。"):
+            with self.subTest(clean=text):
+                self.assertFalse(self.tool.hints(text)["fab_any"])
+        self.assertFalse(self.tool.hints("窗外有风。", creative=True)["fab_any"])
+
     def test_measurement_only(self):
         source = (ROOT / "tools/ceiling_probe.py").read_text(encoding="utf-8")
         for forbidden in ("XIYINRuntime", "ExperienceStore", "initialize_data", "data_root(", "candidate_data",

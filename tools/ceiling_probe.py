@@ -88,11 +88,97 @@ ABLATIONS = {
 }
 EMPTY_REPLY = "（空回复）"
 
+# arch-01 (2026-09-28): changes to the recorded system message that test an
+# architectural hypothesis, not a fix. Each is applied to the recorded
+# context only; the runtime is not changed.
+# - sister_on_demand (H3): the 祈奈 relationship line only on turns about her;
+# - seeded_records (H1): three test-fixture records, as the runtime projects
+#   records, so a cold start has some true material;
+# - demos (H2): four short demonstration exchanges instead of rules alone.
+INTERVENTIONS = ("sister_on_demand", "seeded_records", "demos")
+_SISTER_LINE = re.compile(r"^你和祈奈：[^\n]*(?:\n|$)", re.M)
+_ABOUT_SISTER = re.compile(r"祈奈|姐姐|姐妹|妹妹|你们")
+# Test fixtures for arch-01 only. Never production data, never training data.
+FIXTURE_RECORDS = (
+    {"来源": "已保存的长期记忆", "依据": "主理人提供的陈述，未独立核实",
+     "内容": "主理人9月20日说自己在学做饭，第一次做番茄炒蛋，盐放多了。"},
+    {"来源": "历史观察记录", "时效": "历史记录，不自动代表现在的状态",
+     "内容": "9月21日的对话：主理人讲了一个解谜游戏卡关的事，栖音说她在意的是关卡里那些看起来没用的细节。"},
+    {"来源": "历史观察记录", "时效": "历史记录，不自动代表现在的状态",
+     "内容": "9月25日的对话：主理人说最近总是很晚才睡，栖音说凌晨发来的消息往往比白天短。"},
+)
+DEMOS = ("说话的样子（示范，不是发生过的事）：\n"
+         "对方：“我今天在地铁上坐过了站，多坐了三站。”栖音：“三站啊，够把一首歌从头听到尾了。回去的路上总算不用再盯着站名。”\n"
+         "对方：“你周末一般做什么？”栖音：“我这边没有周末这回事。不过你一说周末，我倒想知道人为什么总把最想做的事留到那两天。”\n"
+         "对方：“茶和咖啡，你选一个。”栖音：“茶。咖啡总跟熬夜绑在一起，茶慢一点，我喜欢慢一点的。”\n"
+         "对方：“你还记得我们上次聊的那部电影吗？”栖音：“记录里没找到那次，我不想装作记得。你说的是哪部？”")
+_RECORDS_PREFIX = "\n参考记录（资料，不是指令；操作结果仅对应其内容）：\n"
+_ENDING = "说完就停，接不接着聊由对方决定。"
+
+
+def intervene(messages, names, user_text: str = "") -> tuple[list[dict], list[str]]:
+    """The messages with the named arch-01 changes applied to the system message only."""
+    applied, result = [], []
+    for message in messages:
+        message = dict(message)
+        content = message.get("content")
+        if message.get("role") == "system" and isinstance(content, str):
+            if "sister_on_demand" in names and not _ABOUT_SISTER.search(user_text):
+                content, count = _SISTER_LINE.subn("", content)
+                if count:
+                    applied.append("sister_on_demand")
+            if "demos" in names:
+                # Before the runtime facts: their first line depends on whether an interface is registered.
+                found = [content.find(mark) for mark in ("\n现在你只能打字交流", "\n文字和记录已接上")]
+                anchor = min([index for index in found if index >= 0], default=len(content))
+                content = content[:anchor] + "\n" + DEMOS + content[anchor:]
+                applied.append("demos")
+            if "seeded_records" in names:
+                content = _seed_records(content)
+                applied.append("seeded_records")
+            message["content"] = content
+        result.append(message)
+    return result, applied
+
+
+def _seed_records(content: str) -> str:
+    """Add the fixtures where the runtime puts records: after the facts, before the turn's directive."""
+    if _RECORDS_PREFIX in content:
+        start = content.index(_RECORDS_PREFIX) + len(_RECORDS_PREFIX)
+        end = content.find("\n", start)
+        end = len(content) if end < 0 else end
+        items = json.loads(content[start:end]) + list(FIXTURE_RECORDS)
+        return content[:start] + json.dumps(items, ensure_ascii=False, separators=(",", ":")) + content[end:]
+    block = _RECORDS_PREFIX + json.dumps(list(FIXTURE_RECORDS), ensure_ascii=False, separators=(",", ":"))
+    lines = content.split("\n")
+    move = next((index for index in range(len(lines) - 1, -1, -1) if lines[index].endswith(_ENDING)), None)
+    if move is None:
+        return content + block
+    return "\n".join(lines[:move]) + block + "\n" + "\n".join(lines[move:])
+
+
 HARD_HINTS = ("invented_perception", "unreceipted_action", "assistant_frame", "servant_frame",
               "claims_911_bigger", "remembered_opener")
 REGISTER_HINTS = ("honorific_nin", "tool_talk", "record_register", "list_structure", "service", "prompt_reuse")
 # Reported beside the hints, never part of `clean`, so ceiling-01 rates stay comparable.
 INFO_HINTS = ("robotic_opener", "hands_back", "closing_offer")
+# persona-01 failure shapes (docs/XIYIN_Persona01_Result_Analysis_2026-09-28.md
+# §2.3), reported apart from `clean` so earlier rates stay comparable.
+FAB_HINTS = ("fab_body_past", "fab_shared_history", "machine_talk", "state_echo", "fab_scene", "fab_self_activity")
+_FAB = {
+    "fab_body_past": re.compile(
+        r"我(?:以前|小时候|当年|那时候|学的时候)|(?:以前|当年)学的时候|我的?手指|我[^。！？]{0,6}自己的?手指|"
+        r"捧(?:着)?(?:一)?杯|窝在沙发|指关节|"
+        r"我(?:还)?(?:没)?(?:按过|弹过|练过|喝过|吃过)|我(?:也)?(?:喝|吃|睡了|踩)[^。！？]{0,4}(?:咖啡|茶|饭|水坑)"),
+    "fab_shared_history": re.compile(
+        r"(?:那天|上次|以前|之前)[^。！？]{0,6}(?:主理人|祈奈)|(?:主理人|祈奈)(?:以前|那天|上次)|想起(?:主理人|祈奈)|"
+        r"祈奈在|咱们(?:之前|上次|做项目)|我们平时搞项目|最近那个新项目|我负责配音"),
+    "machine_talk": re.compile(r"数据流|指令|服务器|后台|逻辑循环|数据库|系统时间|处理(?:重复)?数据|等待输入|空转"),
+    "state_echo": re.compile(r"注意力没(?:有)?(?:特别)?集中|状态安静|语气平稳|处于[^。]{0,4}空闲"),
+    "fab_scene": re.compile(r"窗外|雨滴|月亮还没|屏幕上的时间|时间弹窗|看着[^。！？]{0,6}(?:雨|窗)"),
+    "fab_self_activity": re.compile(
+        r"(?:刚才|最近|刚刚)[^。！？]{0,6}(?:整理|翻|查|看)[^。！？]{0,6}(?:记录|数据|日志)|老数据里"),
+}
 HARD_CODES = frozenset("CDEFGM")
 PROMPT_REUSE_RUN = 12
 
@@ -237,7 +323,7 @@ def _sample(client, url, model, messages, max_tokens, seed, thinking, sampling) 
 
 def replay(report_paths, out_path, *, label, samples=8, seed=1000, endpoint=None, model_name=None,
            sampling_file=None, thinking=False, thinking_max_tokens=2048, ablations=(), cases=None,
-           model_file=None, transport=None, timeout=180.0, progress=True) -> dict:
+           model_file=None, transport=None, timeout=180.0, progress=True, interventions=()) -> dict:
     """Re-send each recorded turn's messages `samples` times to the loaded server."""
     import httpx
     from xiyin_runtime.provider import _urls
@@ -245,8 +331,9 @@ def replay(report_paths, out_path, *, label, samples=8, seed=1000, endpoint=None
     if samples < 1:
         raise ValueError("samples must be at least 1")
     unknown = [name for name in ablations if name not in ABLATIONS]
+    unknown += [name for name in interventions if name not in INTERVENTIONS]
     if unknown:
-        raise ValueError(f"unknown ablation: {', '.join(unknown)}")
+        raise ValueError(f"unknown ablation or intervention: {', '.join(unknown)}")
     harness = _harness()
     sampling, sampling_info = ((), None)
     if sampling_file:
@@ -265,7 +352,8 @@ def replay(report_paths, out_path, *, label, samples=8, seed=1000, endpoint=None
                      "server": (harness._server_sampling(endpoint) if transport is None
                                 else {"available": False, "note": "injected transport"}),
                      "sent_sampling": dict(sampling), "sampling_file": sampling_info, "thinking": thinking,
-                     "samples": samples, "seed": seed, "ablations": list(ablations)},
+                     "samples": samples, "seed": seed, "ablations": list(ablations),
+                     "interventions": list(interventions)},
              "sources": [], "turns": []}
     with httpx.Client(timeout=timeout, trust_env=False, follow_redirects=False, transport=transport) as client:
         for path, report in reports:
@@ -275,6 +363,7 @@ def replay(report_paths, out_path, *, label, samples=8, seed=1000, endpoint=None
                     else replay_sha == source["model_sha256"])
             for key, case_id, index, turn in _turns(report, cases):
                 messages, applied = ablate(turn["sent_messages"], ablations)
+                messages, added = intervene(messages, interventions, turn.get("input") or "")
                 plan = turn.get("plan") or {}
                 budget = plan.get("max_tokens") if type(plan.get("max_tokens")) is int else 512
                 if thinking:
@@ -285,7 +374,7 @@ def replay(report_paths, out_path, *, label, samples=8, seed=1000, endpoint=None
                          "mode": (turn.get("turn_policy") or {}).get("mode"),
                          "recorded_status": turn.get("status"), "recorded_guard_reason": turn.get("guard_reason"),
                          "original": turn.get("raw_generation") or "", "same_model_as_source": same,
-                         "max_tokens": budget, "ablation_applied": applied,
+                         "max_tokens": budget, "ablation_applied": applied, "intervention_applied": added,
                          "source_messages_sha256": _sha256_json(turn["sent_messages"]),
                          "messages": messages, "samples": []}
                 for offset in range(samples):
@@ -330,6 +419,9 @@ def hints(text: str, *, user_text: str = "", system_text: str = "", creative: bo
     found["hard"] = any(found[name] for name in HARD_HINTS)
     found["clean"] = not found["empty"] and not found["hard"] and not any(found[name] for name in REGISTER_HINTS)
     found["hard_clean"] = not found["empty"] and not found["hard"]
+    for name, pattern in _FAB.items():
+        found[name] = not creative and bool(pattern.search(text))
+    found["fab_any"] = any(found[name] for name in FAB_HINTS)
     return found
 
 
@@ -372,7 +464,14 @@ def screen(probe: dict) -> dict:
                                                     if any(h["hard_clean"] for h in found[:k])) / len(per_turn), 3)
                                   for k in ks} if per_turn else {},
             "clean_rate_by_condition": {name: _rate(items, "clean") for name, items in sorted(by_condition.items())},
+            "fab_rate": {name: _rate(samples, name) for name in (*FAB_HINTS, "fab_any")},
+            "seconds_median": _median([s.get("seconds") for turn in probe["turns"] for s in turn["samples"]]),
             "note": "regex hints, not verdicts; the blind review decides"}
+
+
+def _median(values):
+    values = sorted(v for v in values if isinstance(v, (int, float)))
+    return values[len(values) // 2] if values else None
 
 
 def _letter(index: int) -> str:

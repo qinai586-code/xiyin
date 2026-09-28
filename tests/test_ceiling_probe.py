@@ -320,6 +320,14 @@ class CeilingProbeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.replay(label="bad", interventions=("persona",))
 
+    def test_a_thinking_budget_is_sent_only_with_thinking(self):
+        probe, server, _ = self.replay(label="budget", samples=1, thinking=True, thinking_budget=512,
+                                       thinking_max_tokens=1536)
+        self.assertTrue(all(r["thinking_budget_tokens"] == 512 and r["max_tokens"] == 1536 for r in server.requests))
+        self.assertEqual(probe["arm"]["thinking_budget"], 512)
+        _, server, _ = self.replay(label="plain-budget", samples=1, thinking_budget=512)
+        self.assertFalse(any("thinking_budget_tokens" in r for r in server.requests))
+
     def test_fabrication_hints_fire_on_persona01_failures(self):
         cases = (("以前学的时候，我总觉得自己手指像生了锈的钉子。", "fab_body_past"),
                  ("想起主理人以前在雨里踩水坑的样子。", "fab_shared_history"),

@@ -238,6 +238,25 @@ class PersonaExperimentJobTests(unittest.TestCase):
         self.assertEqual(pipeline.arch_reading(base, screen(0.36, 0.70))["reading"], "WORSE")
         self.assertEqual(pipeline.arch_reading(base, screen(0.25, 0.60))["reading"], "NO_CLEAR_EFFECT")
 
+    def test_arch02_fits_the_large_model_and_reads_the_arms_as_predeclared(self):
+        self.assertEqual(pipeline._gpu_layer_candidates(16500, 12000), (36, 28, 20, 12))
+        self.assertEqual(pipeline._gpu_layer_candidates(16500, None), (40, 32, 24, 16))
+        self.assertEqual(pipeline._gpu_layer_candidates(3000, 12000), (64, 56, 48, 40))
+        flags = pipeline.server_flags(20)
+        self.assertEqual(flags[flags.index("--n-gpu-layers") + 1], "20")
+        self.assertEqual(pipeline.server_flags()[flags.index("--n-gpu-layers") + 1], "999")
+
+        def screen(fab, back, truncated=0, samples=104):
+            return {"fab_rate": {"fab_any": fab}, "info_rate": {"hands_back": back}, "hard_clean_rate": 0.9,
+                    "hint_rate": {"empty": 0.0}, "truncated": truncated, "samples": samples}
+        screens = {"base4b": screen(0.30, 0.66), "think4b": screen(0.10, 0.60, truncated=30), "base27": screen(0.12, 0.60)}
+        readings = pipeline.arch02_readings(screens, {"think4b": 104})
+        self.assertEqual((readings["think4b"]["reading"], readings["base27"]["reading"]), ("INVALID", "ARCH_EFFECT"))
+        screens["think4b"] = screen(0.28, 0.64, truncated=3)
+        self.assertEqual(pipeline.arch02_readings(screens, {"think4b": 0})["think4b"]["reading"], "INVALID")
+        self.assertEqual(pipeline.arch02_readings(screens, {"think4b": 90})["think4b"]["reading"], "NO_CLEAR_EFFECT")
+        self.assertEqual(list(pipeline.ALL_JOBS), ["arch02"])
+
     def test_every_reply_level_code_has_one_axis(self):
         codes = [code for table in pipeline.AXES.values() for code in table]
         self.assertEqual(len(codes), len(set(codes)))

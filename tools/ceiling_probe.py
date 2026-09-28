@@ -294,11 +294,12 @@ def _source(path: Path, report: dict) -> dict:
             "sent_sampling": model.get("sent_sampling")}
 
 
-def _sample(client, url, model, messages, max_tokens, seed, thinking, sampling) -> dict:
+def _sample(client, url, model, messages, max_tokens, seed, thinking, sampling, extra=None) -> dict:
     import httpx
 
     payload = {"model": model, "messages": messages, "max_tokens": max_tokens, "stream": False,
-               "seed": seed, "chat_template_kwargs": {"enable_thinking": thinking}, **dict(sampling)}
+               "seed": seed, "chat_template_kwargs": {"enable_thinking": thinking}, **dict(sampling),
+               **(extra or {})}
     record = {"seed": seed, "text": "", "thinking": None, "finish_reason": None,
               "completion_tokens": None, "seconds": None, "error": None}
     started = time.monotonic()
@@ -323,8 +324,14 @@ def _sample(client, url, model, messages, max_tokens, seed, thinking, sampling) 
 
 def replay(report_paths, out_path, *, label, samples=8, seed=1000, endpoint=None, model_name=None,
            sampling_file=None, thinking=False, thinking_max_tokens=2048, ablations=(), cases=None,
-           model_file=None, transport=None, timeout=180.0, progress=True, interventions=()) -> dict:
-    """Re-send each recorded turn's messages `samples` times to the loaded server."""
+           model_file=None, transport=None, timeout=180.0, progress=True, interventions=(),
+           thinking_budget=None) -> dict:
+    """Re-send each recorded turn's messages `samples` times to the loaded server.
+
+    ``thinking_budget`` asks llama.cpp to close the reasoning block after that
+    many tokens (request field ``thinking_budget_tokens``); a server that does
+    not know the field ignores it, which the truncation count then shows.
+    """
     import httpx
     from xiyin_runtime.provider import _urls
 
@@ -353,7 +360,7 @@ def replay(report_paths, out_path, *, label, samples=8, seed=1000, endpoint=None
                                 else {"available": False, "note": "injected transport"}),
                      "sent_sampling": dict(sampling), "sampling_file": sampling_info, "thinking": thinking,
                      "samples": samples, "seed": seed, "ablations": list(ablations),
-                     "interventions": list(interventions)},
+                     "interventions": list(interventions), "thinking_budget": thinking_budget},
              "sources": [], "turns": []}
     with httpx.Client(timeout=timeout, trust_env=False, follow_redirects=False, transport=transport) as client:
         for path, report in reports:
@@ -378,8 +385,9 @@ def replay(report_paths, out_path, *, label, samples=8, seed=1000, endpoint=None
                          "source_messages_sha256": _sha256_json(turn["sent_messages"]),
                          "messages": messages, "samples": []}
                 for offset in range(samples):
-                    entry["samples"].append(_sample(client, chat_url, model_name, messages, budget,
-                                                    seed + offset, thinking, sampling))
+                    entry["samples"].append(_sample(
+                        client, chat_url, model_name, messages, budget, seed + offset, thinking, sampling,
+                        {"thinking_budget_tokens": thinking_budget} if thinking and thinking_budget else None))
                 probe["turns"].append(entry)
                 if progress:
                     done = sum(1 for sample in entry["samples"] if not sample["error"])

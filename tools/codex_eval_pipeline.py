@@ -83,6 +83,8 @@ DEFAULTS = {
     "server": r"D:\cuda\bin\llama-server.exe",
     "model4": r"D:\cuda\model\Qwen_Qwen3.5-4B-Q4_K_M.gguf",
     "model9": r"D:\cuda\model\Qwen_Qwen3.5-9B-Q4_K_M.gguf",
+    # arch02 only: bartowski/Qwen_Qwen3.5-27B-GGUF, the same family as model4/model9.
+    "model27": r"D:\cuda\model\Qwen_Qwen3.5-27B-Q4_K_M.gguf",
     "ceiling01": r"C:\XIYIN\evidence\ceiling-01-48f2b93\ceiling_outputs",
     "v4source": r"C:\XIYIN\evidence\persona-v5-ff3fd30\retest_outputs\v5-run-01\qwen4b-q4-v4-r1\dialogue.json",
 }
@@ -109,16 +111,18 @@ NOT_PACKED = ("keys", "tmp")
 # Job function name -> folder prefix. "all" runs ALL_JOBS in order: the persona
 # repair comparison, then Phase B again so the integrity.v2 checker is measured
 # on real candidates. ceiling-02 is done (55e61f8) and stays a single job.
-FOLDERS = {"ceiling02": "ceiling-02", "phaseb01": "phase-b-01", "persona01": "persona-01", "arch01": "arch-01"}
-# 2026-09-28: persona01 and phaseb01 are done (319f634); "all" now runs the
-# architecture diagnosis only. Each earlier job stays runnable on its own.
-ALL_JOBS = ("arch01",)
+FOLDERS = {"ceiling02": "ceiling-02", "phaseb01": "phase-b-01", "persona01": "persona-01", "arch01": "arch-01",
+           "arch02": "arch-02"}
+# 2026-09-28: persona01, phaseb01 (319f634) and arch01 (fe51862) are done;
+# "all" now runs the model-ceiling check only. Each job stays runnable alone.
+ALL_JOBS = ("arch02",)
 
 
-def server_flags() -> list[str]:
+def server_flags(gpu_layers: int = 999) -> list[str]:
     # The exact ceiling-01 launch (run_ceiling.py LocalServer), so arms stay comparable.
+    # Only a model larger than the GPU (arch02's 27B) is started with fewer layers.
     return ["--host", HOST, "--port", str(PORT), "--alias", "xiyin", "--ctx-size", "4096", "--parallel", "1",
-            "--n-gpu-layers", "999", "--jinja", "--chat-template-kwargs", '{"enable_thinking":false}',
+            "--n-gpu-layers", str(gpu_layers), "--jinja", "--chat-template-kwargs", '{"enable_thinking":false}',
             "--no-mmproj-auto"]
 
 
@@ -275,8 +279,9 @@ class GpuSampler:
 class ModelServer:
     """Start llama-server with the recorded flags, wait for health, always stop it."""
 
-    def __init__(self, server: str, model: str, log_path: Path, *, timeout=600):
+    def __init__(self, server: str, model: str, log_path: Path, *, timeout=600, gpu_layers=999):
         self.server, self.model, self.log_path, self.timeout = server, model, log_path, timeout
+        self.gpu_layers = gpu_layers
         self.process, self._log = None, None
 
     def __enter__(self):
@@ -284,7 +289,7 @@ class ModelServer:
             raise RuntimeError(f"Something already listens on {HOST}:{PORT}. Stop it yourself first; "
                                "this pipeline never stops a process it did not start.")
         command = [console_python(), self.server] if self.server.endswith(".py") else [self.server]
-        command += ["--model", self.model, *server_flags()]
+        command += ["--model", self.model, *server_flags(self.gpu_layers)]
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log = self.log_path.open("ab")
         self._log.write(f"\n=== {_now()} {json.dumps(command, ensure_ascii=False)}\n".encode("utf-8"))
@@ -1283,6 +1288,223 @@ def _arch01_report(out: Path, a: dict) -> None:
               "## 异常与偏差", "", "（执行者填写；没有就写“无”。）", "", "```",
               f"ARCH01_MEASUREMENT: {'COMPLETE' if complete else 'PARTIAL'}",
               f"ARCH01_VERDICT: {verdict}",
+              f"DEFAULT_CHANGE: {'NONE' if not pre['tracked_changes'] else 'SEE_DIFF'}",
+              "TRAINING: NOT_AUTHORIZED", "MERGE_STATUS: DO_NOT_MERGE", "```"]
+    (out / "REPORT-DRAFT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+# --- arch-02 ------------------------------------------------------------------
+# Is this the model's ceiling? The same 52 recorded contexts as arch01 (plain
+# V4, persona01 A arm) replayed on: 4B as recorded (base4b); 4B with a short,
+# bounded reasoning step (think4b; arch01's thinking arm ran out of budget
+# while still thinking); and Qwen3.5-27B, the same family at about seven times
+# the size, partly held in system memory (base27). Measurement only.
+ARCH02_SAMPLES = 2
+ARCH02_ARMS = (("base4b", "model4", {}),
+               ("think4b", "model4", {"thinking": True, "thinking_budget": 512, "thinking_max_tokens": 1536}),
+               ("base27", "model27", {"timeout": 900.0}))
+MIN_TOKENS_PER_SECOND = 1.5
+
+
+def _free_vram_mib() -> int | None:
+    if not shutil.which("nvidia-smi"):
+        return None
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=20, creationflags=NO_WINDOW).stdout.split()
+        return int(out[0]) if out else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _total_ram_mib() -> int | None:
+    try:
+        if WINDOWS:
+            import ctypes
+
+            class Status(ctypes.Structure):
+                _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total", ctypes.c_ulonglong),
+                            ("available", ctypes.c_ulonglong), ("page_total", ctypes.c_ulonglong),
+                            ("page_available", ctypes.c_ulonglong), ("virtual_total", ctypes.c_ulonglong),
+                            ("virtual_available", ctypes.c_ulonglong), ("extended", ctypes.c_ulonglong)]
+            status = Status()
+            status.length = ctypes.sizeof(Status)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+            return status.total // 2**20
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // 2**20
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _gpu_layer_candidates(size_mib: float, free_mib: int | None, total_layers: int = 64) -> tuple[int, ...]:
+    """GPU layer counts to try for a model larger than the GPU, most first."""
+    if not free_mib:
+        return (40, 32, 24, 16)
+    fit = max(8, min(total_layers, int((free_mib - 2500) / (size_mib / total_layers))))
+    return tuple(dict.fromkeys(max(8, fit - step) for step in (0, 8, 16, 24)))
+
+
+def _generation_speed() -> float:
+    """Tokens per second of one short request to the running server."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # loopback only
+    body = json.dumps({"model": "xiyin", "messages": [{"role": "user", "content": "用一句话说说春天。"}],
+                       "max_tokens": 48, "stream": False,
+                       "chat_template_kwargs": {"enable_thinking": False}}).encode("utf-8")
+    request = urllib.request.Request(f"http://{HOST}:{PORT}/v1/chat/completions", data=body,
+                                     headers={"Content-Type": "application/json"})
+    started = time.monotonic()
+    with opener.open(request, timeout=600) as response:
+        reply = json.loads(response.read())
+    timings = reply.get("timings") or {}
+    if timings.get("predicted_per_second"):
+        return round(float(timings["predicted_per_second"]), 2)
+    tokens = (reply.get("usage") or {}).get("completion_tokens") or 0
+    return round(tokens / max(time.monotonic() - started, 1e-6), 2)
+
+
+def _fitted_server(args, model: str, log_path: Path):
+    """A running server for a model larger than the GPU: the most GPU layers that load and stay usable.
+
+    On Windows the NVIDIA driver may spill an oversized allocation into system
+    memory instead of failing; that loads but crawls, so a speed check turns
+    it into a retry with fewer layers.
+    """
+    tried = []
+    for layers in _gpu_layer_candidates(Path(model).stat().st_size / 2**20, _free_vram_mib()):
+        server = ModelServer(args.server, model, log_path, timeout=1200, gpu_layers=layers)
+        try:
+            server.__enter__()
+        except RuntimeError as exc:
+            if "already listens" in str(exc):
+                raise
+            tried.append({"gpu_layers": layers, "error": str(exc)[:200]})
+            continue
+        try:
+            speed = _generation_speed()
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            server.__exit__(None, None, None)
+            tried.append({"gpu_layers": layers, "error": type(exc).__name__})
+            continue
+        tried.append({"gpu_layers": layers, "tokens_per_second": speed})
+        if speed >= MIN_TOKENS_PER_SECOND:
+            return server, tried
+        server.__exit__(None, None, None)
+    raise RuntimeError(f"the large model did not run at {MIN_TOKENS_PER_SECOND} tokens/s or more "
+                       f"with any GPU layer count: {tried}")
+
+
+def arch02(args):
+    out = Path(args.out)
+    preflight(out, args, extra={"model27": args.model27})
+    sources = _arch_sources(out)
+    _unit_tests(out)
+    cp = _load("ceiling_probe", "tools/ceiling_probe.py")
+    harness = _load("acceptance_dialogue", "tools/acceptance_dialogue.py")
+    cases = {case["id"] for case in harness.EVERYDAY_CASES} | set(PERSONA_REVIEW_CORE)
+    for model_key in ("model4", "model27"):
+        todo = [(arm, options) for arm, key, options in ARCH02_ARMS
+                if key == model_key and not (out / f"probe-arch02-{arm}.json").exists()]
+        if not todo:
+            continue
+        log_path = out / "logs" / f"server-{model_key}.log"
+        with GpuSampler() as gpu:
+            if model_key == "model27":
+                server, tried = _fitted_server(args, args.model27, log_path)
+                write_json(out / "logs" / "model27-fit.json", {"tried": tried, "ram_mib": _total_ram_mib()})
+            else:
+                server = ModelServer(args.server, args.model4, log_path)
+                server.__enter__()
+            try:
+                for arm, options in todo:
+                    target = out / f"probe-arch02-{arm}.json"
+                    partial = target.with_name(target.name + ".partial")
+                    log(out, f"arch02 {arm} ({ARCH02_SAMPLES} samples per turn)")
+                    started = time.monotonic()
+                    cp.replay([str(path) for path in sources], partial, label=f"arch02-{arm}",
+                              samples=ARCH02_SAMPLES, seed=2000, cases=cases, model_file=getattr(args, model_key),
+                              progress=False, **options)
+                    errors = sum(1 for turn in read_json(partial)["turns"] for s in turn["samples"] if s.get("error"))
+                    partial.replace(target)
+                    log(out, f"arch02 {arm} done in {time.monotonic() - started:.0f}s; transport errors {errors}")
+            finally:
+                server.__exit__(None, None, None)
+        write_json(out / "logs" / f"gpu-peak-{model_key}.json", {"peak_mib": gpu.peak})
+    arch02_analysis(out, cp)
+
+
+def arch02_readings(screens: dict, thinking_samples: dict) -> dict:
+    """Predeclared (2026-09-28, before any run); each arm against base4b, arch_reading's bar.
+
+    think4b is INVALID when no sample thought or more than a fifth were cut
+    off: then the bounded reasoning did not happen and the arm says nothing.
+    """
+    readings = {}
+    for arm in ("think4b", "base27"):
+        if "base4b" not in screens or arm not in screens:
+            continue
+        reading = arch_reading(screens["base4b"], screens[arm])
+        s = screens[arm]
+        if arm == "think4b" and (not thinking_samples.get(arm) or s["truncated"] > 0.2 * max(s["samples"], 1)):
+            reading["reading"] = "INVALID"
+        readings[arm] = reading
+    return readings
+
+
+def arch02_analysis(out: Path, cp) -> dict:
+    screens, thinking = {}, {}
+    for arm, _, _ in ARCH02_ARMS:
+        path = out / f"probe-arch02-{arm}.json"
+        if not path.exists():
+            continue
+        probe = read_json(path)
+        screens[arm] = cp.screen(probe)
+        thinking[arm] = sum(1 for turn in probe["turns"] for s in turn["samples"]
+                            if not s.get("error") and s.get("thinking"))
+    fit_path = out / "logs" / "model27-fit.json"
+    analysis = {"arms": sorted(screens), "screens": screens, "thinking_samples": thinking,
+                "readings": arch02_readings(screens, thinking),
+                "model27_fit": read_json(fit_path) if fit_path.exists() else None}
+    write_json(out / "arch02-readings.json", analysis)
+    _arch02_report(out, analysis)
+    log(out, "arch02 analysis done; see REPORT-DRAFT.md")
+    return analysis
+
+
+def _arch02_report(out: Path, a: dict) -> None:
+    pre = read_json(out / "preflight.json")
+    screens, readings, fit = a["screens"], a["readings"], a["model27_fit"] or {}
+    chosen = next((item for item in reversed(fit.get("tried", [])) if item.get("tokens_per_second")), {})
+    lines = ["# arch-02 报告草稿（由 tools/codex_eval_pipeline.py 生成）", "",
+             f"- 提交：`{pre['commit']}`；工作树有改动：{pre['tracked_changes']}；平台：{pre['platform']}",
+             f"- 臂：{len(screens)}/{len(ARCH02_ARMS)}；本目录的运行记录：{_history_line(out)}",
+             f"- 27B：GPU 层数 {chosen.get('gpu_layers', 'N/A')}，生成速度 {chosen.get('tokens_per_second', 'N/A')} tok/s，"
+             f"内存 {fit.get('ram_mib', 'N/A')} MiB；尝试记录 {fit.get('tried', 'N/A')}",
+             f"- 思考实际发生的样本：{a['thinking_samples'].get('think4b', 'N/A')}", "",
+             "同一批 52 轮上下文（persona-01 A 臂原版 V4），每轮 " + str(ARCH02_SAMPLES) + " 个样本。"
+             "base4b=4B 原样；think4b=4B 先想最多 512 token；base27=Qwen3.5-27B（同家族，约 7 倍大小）。", "",
+             "| 臂 | 样本 | 编造类 | 身体/过去 | 共同经历 | 机器腔 | 状态回显 | 场景 | 自称活动 | 抛回话头 | 硬提示 | 空回复 | 截断 | 秒/样本 | 读法（对 base4b） |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for arm, _, _ in ARCH02_ARMS:
+        s = screens.get(arm)
+        if not s:
+            continue
+        f = s["fab_rate"]
+        lines.append(f"| {arm} | {s['samples']} | {f['fab_any']} | {f['fab_body_past']} | {f['fab_shared_history']} | "
+                     f"{f['machine_talk']} | {f['state_echo']} | {f['fab_scene']} | {f['fab_self_activity']} | "
+                     f"{s['info_rate']['hands_back']} | {round(1 - (s['hard_clean_rate'] or 0), 3)} | "
+                     f"{s['hint_rate']['empty']} | {s['truncated']} | {s['seconds_median']} | "
+                     f"{readings.get(arm, {}).get('reading', '—')} |")
+    complete = len(screens) == len(ARCH02_ARMS)
+    size = readings.get("base27", {}).get("reading")
+    verdict = ("PENDING" if not complete else
+               "SIZE_HELPS(4B_AT_ITS_CEILING)" if size == "ARCH_EFFECT" else "NOT_SOLVED_BY_27B")
+    lines += ["", "读法（预先写定）：编造类或抛回话头降到 base4b 的一半以下，且硬提示、空回复各不高于 0.03 → ARCH_EFFECT；"
+              "编造类或硬提示高 0.05 以上 → WORSE；其余 → NO_CLEAR_EFFECT。think4b 若无人思考或截断超过五分之一 → INVALID。"
+              "正则提示，需人工核对样本。", "",
+              "## 异常与偏差", "", "（执行者填写；没有就写“无”。）", "", "```",
+              f"ARCH02_MEASUREMENT: {'COMPLETE' if complete else 'PARTIAL'}",
+              f"MODEL_CEILING: {verdict}",
+              f"THINKING_4B: {readings.get('think4b', {}).get('reading', 'PENDING')}",
               f"DEFAULT_CHANGE: {'NONE' if not pre['tracked_changes'] else 'SEE_DIFF'}",
               "TRAINING: NOT_AUTHORIZED", "MERGE_STATUS: DO_NOT_MERGE", "```"]
     (out / "REPORT-DRAFT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

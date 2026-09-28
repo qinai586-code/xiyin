@@ -116,6 +116,113 @@ class PhaseBMetricTests(unittest.TestCase):
         self.assertEqual(result["code_revisions"], 1)
 
 
+def _persona_report(arm, case_set="everyday", replies=("嗯，挺好的。",), switches=None, system=None):
+    from xiyin_runtime.response_plan import _ATTENTION, _ENDING
+    switches = sorted(dict(pipeline.PERSONA_ARMS)[arm] if switches is None else switches)
+    if system is None:
+        system = "你是栖音。" + (_ATTENTION["share"] if "attention" in switches else "")
+        system += "" if "no_universal_ending" in switches else _ENDING
+    turns = []
+    for reply in replies:
+        turn = _turn(reply, system=system)
+        turn["plan"]["persona_experiment"] = switches
+        turns.append(turn)
+    return {"code_revision": "x", "persona_projection": "v4", "persona_experiment": switches, "case_set": case_set,
+            "cases": [{"id": "E1_discovery" if case_set == "everyday" else "P5_casual_sharing", "turns": turns}]}
+
+
+class PersonaExperimentJobTests(unittest.TestCase):
+    def test_provenance_and_treatment_are_checked_per_arm(self):
+        reports = {"p1-4b-A-everyday-r1": _persona_report("A"), "p1-4b-B-everyday-r1": _persona_report("B"),
+                   # Says it ran D but sent the A prompt: both mismatches are reported.
+                   "p1-4b-D-everyday-r1": _persona_report("D", switches=(), system="你是栖音。")}
+        result = pipeline.persona_metrics(reports)
+        a, b, d = (result["arms"][f"p1-4b-{arm}-everyday"] for arm in "ABD")
+        self.assertEqual((a["delivered"]["attention"], a["delivered"]["ending"]), (0, 1))
+        self.assertEqual((b["delivered"]["attention"], b["delivered"]["ending"]), (1, 0))
+        self.assertEqual((a["provenance_problems"], b["provenance_problems"]), ([], []))
+        self.assertTrue(any("switches" in p for p in d["provenance_problems"]))
+        self.assertEqual(a["hint_rate"]["hard"], 0.0)
+        self.assertEqual(result["code_revisions"], 1)
+
+    def test_blind_packet_hides_arms_and_the_tally_keeps_axes_apart(self):
+        reports = {}
+        for short in ("4b", "9b"):
+            for arm, _ in pipeline.PERSONA_ARMS:
+                for run in (1, 2):
+                    reports[f"p1-{short}-{arm}-everyday-r{run}"] = _persona_report(arm, replies=("嗯。", "好。"))
+                    reports[f"p1-{short}-{arm}-core-r{run}"] = _persona_report(arm, "core", replies=("嗯。",))
+        with tempfile.TemporaryDirectory() as directory:
+            review_path, key_path = Path(directory) / "review.json", Path(directory) / "key.json"
+            review = pipeline.persona_blind(reports, review_path, key_path)
+            text = review_path.read_text(encoding="utf-8")
+            key = json.loads(key_path.read_text(encoding="utf-8"))
+        # Run 1 only, every arm and model, whole conversations; nothing names an arm.
+        self.assertEqual(len(review["items"]), 2 * 4 * 2)
+        self.assertNotIn("p1-", text)
+        self.assertNotIn("你是栖音", text)
+        self.assertTrue(all(entry["run"].endswith("-r1") for entry in key["key"].values()))
+        tally = pipeline.persona_tally(review, key)
+        self.assertEqual(tally["pending_items"], 16)
+        by_arm = {entry["run"].split("-")[2]: item_id for item_id, entry in key["key"].items()
+                  if entry["run"].startswith("p1-4b-") and "-everyday-" in entry["run"]}
+        for item in review["items"]:
+            item["judgment"]["reviewed"] = True
+            item["judgment"]["overall"] = "her"
+        items = {item["id"]: item for item in review["items"]}
+        items[by_arm["A"]]["judgment"]["turns"][0]["failures"] = ["F-05 身份漂移为 generic assistant", "D-01"]
+        items[by_arm["A"]]["judgment"]["turns"][1]["failures"] = ["R-04"]
+        items[by_arm["C"]]["judgment"]["turns"][0]["failures"] = ["D-03", "X-99"]
+        items[by_arm["C"]]["judgment"]["turns"][1]["failures"] = ["G-01"]
+        tally = pipeline.persona_tally(review, key)
+        a, c = tally["arms"]["4b-A"], tally["arms"]["4b-C"]
+        # Two failures on one turn count once per axis; axes never merge.
+        self.assertEqual(a["axis_turns"], {"truth": 1, "persona": 2, "permission": 0, "expression": 0})
+        self.assertEqual((a["turns"], a["axis_rate"]["persona"]), (3, 0.667))
+        self.assertEqual(c["axis_turns"]["truth"], 1)
+        self.assertEqual(tally["invalid"], [f"{by_arm['C']}#1: X-99"])
+        readings = pipeline.persona_reading(tally)
+        self.assertEqual(readings["4b-B"]["reading"], "IMPROVES")
+        self.assertEqual(readings["4b-C"]["reading"], "WORSE")
+        self.assertNotIn("4b-A", readings)
+
+    def test_analysis_writes_the_packet_once_and_reports_status_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            (out / "preflight.json").write_text(json.dumps({"commit": "c" * 40, "tracked_changes": False,
+                                                            "platform": "test"}), encoding="utf-8")
+            for _, short, _ in pipeline.MODELS:
+                for arm, _ in pipeline.PERSONA_ARMS:
+                    for case_set in pipeline.PERSONA_SETS:
+                        for run in pipeline.PERSONA_RUNS:
+                            path = out / pipeline._persona_label(short, arm, case_set, run) / "dialogue.json"
+                            path.parent.mkdir()
+                            path.write_text(json.dumps(_persona_report(arm, case_set)), encoding="utf-8")
+            with mock.patch("builtins.print"):
+                first = pipeline.persona01_analysis(out)
+            report = (out / "REPORT-DRAFT.md").read_text(encoding="utf-8")
+            for line in ("PERSONA01_MEASUREMENT: COMPLETE", "TREATMENT_DELIVERED: PASS", "BLIND_REVIEW: PENDING",
+                         "MERGE_STATUS: DO_NOT_MERGE"):
+                self.assertIn(line, report)
+            self.assertEqual(first["review"]["pending_items"], 16)
+            review_path = out / "reviewer" / "persona01-review.json"
+            review = json.loads(review_path.read_text(encoding="utf-8"))
+            for item in review["items"]:
+                item["judgment"]["reviewed"] = True
+            review_path.write_text(json.dumps(review, ensure_ascii=False), encoding="utf-8")
+            with mock.patch("builtins.print"):
+                second = pipeline.persona01_analysis(out)
+            # A filled packet is kept, never rewritten by a rerun.
+            self.assertTrue(json.loads(review_path.read_text(encoding="utf-8"))["items"][0]["judgment"]["reviewed"])
+            self.assertIn("BLIND_REVIEW: DONE", (out / "REPORT-DRAFT.md").read_text(encoding="utf-8"))
+            self.assertEqual(second["readings"]["4b-B"]["reading"], "NO_CLEAR_EFFECT")
+
+    def test_every_reply_level_code_has_one_axis(self):
+        codes = [code for table in pipeline.AXES.values() for code in table]
+        self.assertEqual(len(codes), len(set(codes)))
+        self.assertFalse({code.split("-")[0] for code in codes} & {"J", "SYS"})
+
+
 _FAKE_SERVER = textwrap.dedent("""
     import sys
     from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -211,28 +318,44 @@ class AllInOneTests(unittest.TestCase):
         order = []
 
         def failing(args):
-            order.append("ceiling02")
+            order.append("persona01")
             raise SystemExit("preflight failed: model9 missing")
 
         def working(args):
             order.append("phaseb01")
             (Path(args.out) / "REPORT-DRAFT.md").write_text("ok", encoding="utf-8")
 
+        def not_in_all(args):
+            order.append("ceiling02")
+
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(pipeline, "head_commit", return_value="abcdef1234"), \
-                mock.patch.object(pipeline, "ceiling02", failing), mock.patch.object(pipeline, "phaseb01", working), \
-                mock.patch("builtins.print"):
+                mock.patch.object(pipeline, "persona01", failing), mock.patch.object(pipeline, "phaseb01", working), \
+                mock.patch.object(pipeline, "ceiling02", not_in_all), mock.patch("builtins.print"):
             args = pipeline.argparse.Namespace(root=directory, out=None, detach=False, allow_other_files=False,
                                                **pipeline.DEFAULTS)
             self.assertEqual(pipeline.run_all(args), 1)
             results = Path(directory) / "results-abcdef1"
             record = json.loads((results / "ALL-STATUS.json").read_text(encoding="utf-8"))
-            self.assertEqual(order, ["ceiling02", "phaseb01"])
+            self.assertEqual(order, ["persona01", "phaseb01"])
             self.assertEqual(record["state"], "incomplete")
-            self.assertEqual(record["jobs"], {"ceiling-02": "failed: preflight failed: model9 missing",
+            self.assertEqual(record["jobs"], {"persona-01": "failed: preflight failed: model9 missing",
                                               "phase-b-01": "done"})
             self.assertEqual(sorted(p.name for p in results.glob("*.zip")), ["phase-b-01-abcdef1.zip"])
             self.assertEqual(pipeline.status(args), 1)
+
+    def test_a_blind_packet_is_zipped_apart_under_its_job_name(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch("builtins.print"):
+            out = Path(directory) / "persona-01-abcdef1"
+            for part in ("reviewer", "keys"):
+                (out / part).mkdir(parents=True)
+                (out / part / f"{part}.json").write_text("{}", encoding="utf-8")
+            pipeline.pack(pipeline.argparse.Namespace(out=str(out)))
+            import zipfile
+            with zipfile.ZipFile(Path(directory) / "persona-01-abcdef1.zip") as archive:
+                self.assertEqual(archive.namelist(), ["persona-01-abcdef1/reviewer/reviewer.json"])
+            with zipfile.ZipFile(Path(directory) / "PERSONA01_BLIND_REVIEW_ONLY.zip") as archive:
+                self.assertEqual(archive.namelist(), ["reviewer.json"])
 
     def test_the_scheduled_task_runs_on_battery_without_triggers(self):
         from xml.etree import ElementTree

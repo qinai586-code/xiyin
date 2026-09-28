@@ -48,3 +48,11 @@ idle_sleep_seconds = 300
 # the default stays false until the owner adopts it.
 [integrity]
 verify_before_release = false
+
+# Persona repair experiment (2026-09-28). Each switch applies only when
+# persona_projection = "v4" and is recorded with every turn; all are off by
+# default. Names: attention, self_facts_on_demand, tool_menu_on_demand,
+# no_universal_ending (see xiyin_runtime/config.py). The acceptance harness
+# takes --persona-experiment instead, so this file need not be edited.
+# [persona_experiment]
+# enabled = []

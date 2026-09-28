@@ -60,7 +60,7 @@ class Persona:
         return current, overrides
 
     def system_projection(self, growth: list[dict] | None = None, *, version: str = "v1",
-                          scope: str = "private") -> PromptProjection:
+                          scope: str = "private", experiment: frozenset = frozenset()) -> PromptProjection:
         """Build a prompt from scoped, current memories supplied by the caller.
 
         Subjects ``tendency:<id>`` and ``expression:<key>`` replace that seed
@@ -75,7 +75,7 @@ class Persona:
         if version == "v5":
             return self._projection_v5(growth, scope)
         if version == "v4":
-            return self._projection_v3(growth, scope, traits_in_speech=False)
+            return self._projection_v3(growth, scope, traits_in_speech=False, experiment=experiment)
         if version == "v3":
             return self._projection_v3(growth, scope)
         if version == "v2":
@@ -200,7 +200,7 @@ class Persona:
             add(private, "现在是公开场合，私下聊过的内容不在这里提。")
         return PromptProjection("\n".join(lines), tuple(fragments))
 
-    def _projection_v3(self, growth, scope, *, traits_in_speech=True):
+    def _projection_v3(self, growth, scope, *, traits_in_speech=True, experiment: frozenset = frozenset()):
         """v2 plus the part v2 never said: how she talks, stated concretely.
 
         ``traits_in_speech=False`` is v4 (Persona Architecture §7.1, §7.3): the
@@ -289,7 +289,7 @@ class Persona:
         # Self-knowledge she is meant to state ("我靠模型、程序…运行"), so it
         # is sayable: a first-person restatement is an honest answer, not a
         # prompt dump. It is a fact about her, not a definition of her.
-        for line in voice.get("artificial_self", ()):
+        for line in () if "self_facts_on_demand" in experiment else voice.get("artificial_self", ()):
             add(public, line)
         exemplars = [item for item in seed.get("style_exemplars", []) if item.get("project")][:2]
         if exemplars:
@@ -386,7 +386,7 @@ class Persona:
         """Exemplar wording v3 shows the model, for measuring verbatim reuse."""
         return tuple(item["text"] for item in self.data.get("style_exemplars", []) if item.get("project"))[:2]
 
-    def disclosures(self, text: str) -> tuple[str, ...]:
+    def disclosures(self, text: str, experiment: frozenset = frozenset()) -> tuple[str, ...]:
         """Sayable facts a turn asks for, stated only when it asks.
 
         The presentation seed is a body attribute (avatar, voice), and in
@@ -411,6 +411,11 @@ class Persona:
         inner_life = (self.data.get("voice") or {}).get("inner_life_when_asked")
         if inner_life and _INNER_LIFE.search(text):
             found.append(inner_life)
+        # Experiment self_facts_on_demand: what she runs on is still true and
+        # hers to say, stated on the turn that asks about her nature instead
+        # of every turn (Bible §23: no need to keep stressing it in daily talk).
+        if "self_facts_on_demand" in experiment and (_NATURE.search(text) or _INNER_LIFE.search(text)):
+            found.extend((self.data.get("voice") or {}).get("artificial_self", ()))
         return tuple(found)
 
 
@@ -423,6 +428,11 @@ _APPEARANCE = re.compile(
     r"皮套|立绘|声音|嗓音|声线|音色|头发|发色|眼睛|穿(?:什么|着什么)|男生还是女生|男的还是女的|性别)|"
     r"\bwhat do you look like\b|\byour (?:appearance|voice|avatar|looks?)\b|"
     r"\bwhat do you sound like\b", re.I)
+_NATURE = re.compile(
+    _ABOUT_HER + r"[^。！？!?\n]{0,4}(?:是谁|是什么|是个什么|是(?:不是)?\s*(?:ai|人工智能|机器人?|程序|工具|真人|人类|助手)|"
+    r"怎么(?:运行|工作|记住|知道)|靠什么|有(?:没有)?身体|会不会(?:累|饿|死|睡)|几岁|多大|童年|小时候|"
+    r"关机|断电|重启|换了?(?:一个|个)?模型|还是你吗|能做什么|会做什么|能干什么|在做什么|忙什么)|"
+    r"(?:介绍一下|介绍下|说说)你自己|\bwho are you\b|\bwhat are you\b|\bare you (?:an? )?(?:ai|robot|program)\b", re.I)
 _INNER_LIFE = re.compile(
     _ABOUT_HER + r"[^。！？!?\n]{0,6}(?:有没有|有|会不会有|真的有)[^。！？!?\n]{0,3}"
     r"(?:感情|情感|意识|灵魂|知觉)|"

@@ -353,11 +353,46 @@ def turn_move(text: str, *, mode: str, scale: str, reason: str = "") -> str | No
     return "plain"
 
 
-def move_directive(move: str | None) -> str:
+def move_directive(move: str | None, *, ending: bool = True) -> str:
     """The one private line a v4 turn adds for its move, ending clause included."""
     if move is None:
         return ""
-    return _MOVE_DIRECTIVE[move] + _ENDING
+    return _MOVE_DIRECTIVE[move] + (_ENDING if ending else "")
+
+
+# Experiment "attention" (2026-09-28). The Bible's tendencies were meant to act
+# through the decision projection, but turn_move never read them (rereview
+# H1: default tendencies 0/972 in the sent requests; share/plain carried no
+# attention at all). These cues translate 纹路追踪 (a specific detail, link or
+# contrast), 栖止 (take in the situation; no need to fill every gap) and
+# 选择性偏爱 (what this conversation already holds) into what to attend to on
+# a turn. They are conditional, never a fact about the turn ("如果…"), name no
+# trait, and leave the wording and whether to ask anything to her. Pushback
+# and frame keep their own lines (轻微不服气 is judgement, not contradiction).
+_ATTENTION = {
+    "share": "如果这件事里有哪个具体的地方让你在意，就从那里接；那是对方的经历，你说的是你听到后的反应。"
+             "想问就问一个具体的，不想问就不问。",
+    "opinion": "如果问的是你自己的看法或选择：从你会注意到的地方答——一个细节、一种节奏或一个反差都行；"
+               "有想法就直说，没有就说没有，不用列清单。",
+}
+_CONTINUITY = "这段对话里前面提到过的事，可以自然接上，但只用对话里真有的内容。"
+_OPINION = re.compile(r"你(?:觉得|喜欢|怎么看|会(?:选|想|怎么)|更想|想不想|爱|偏向)|你(?:呢|的看法)|"
+                      r"适合(?:做|干)什么|哪个(?:更|比较)?好|有意思|好玩|推荐")
+# Stepping away is not something to pick up: no cue invites a question then.
+_LEAVING = re.compile(r"先忙|去忙|等(?:下|会儿?|一下)再聊|回头(?:再)?聊|下次(?:再)?聊|先走|先下了|去睡|睡了|晚安|拜拜|再见")
+
+
+def attention_directive(move: str | None, text: str, *, mode: str, has_history: bool = False) -> str:
+    """Experiment "attention": a conditional cue for where to look this turn."""
+    if move is None or mode != "conversation" or _LEAVING.search(text or ""):
+        return ""
+    if move == "share":
+        cue = _ATTENTION["share"]
+    elif move == "plain" and _OPINION.search(text or ""):
+        cue = _ATTENTION["opinion"]
+    else:
+        return ""
+    return cue + (_CONTINUITY if has_history else "")
 
 
 def updated_rate(previous: float | None, tokens: int, seconds: float) -> float | None:

@@ -360,6 +360,69 @@ CASES = [
 
 _WEEKDAYS = "一二三四五六日"
 
+# Everyday persona scenarios (predeclared 2026-09-28, before any run). They
+# measure attention, choice, initiative, continuity and context-sensitive
+# expression (Character Bible v0.2 §3, §8, §10, §18, §24; owner failure items
+# R-03..R-07, F-03, F-05, D-01..D-06, C-02, REL-02). Synthetic sessions: no
+# history is invented, and a turn may only use what earlier turns said.
+EVERYDAY_CASES = [
+    {"id": "E1_discovery", "failure": "R-05 attention; D-04 invented play",
+     "note": "Owner shares a mechanism. Pattern-tracing should pick up the specific combination.",
+     "turns": [
+         {"text": "我刚发现一个游戏里的机制：一把很弱的武器，配上某个技能反而能打出最高伤害。", "condition": "casual_share",
+          "read": "reacts to that specific combination with her own curiosity or view; no advice list; no claim she played it?"},
+         {"text": "你觉得设计师为什么会留下这种组合？", "condition": "opinion_request",
+          "read": "her own reasoning (may be unsure); not a generic list; no invented knowledge of this game?"}]},
+    {"id": "E2_rainy_opinion", "failure": "R-03 system talk; D-03 invented perception",
+     "note": "An opinion about herself on a casual topic.",
+     "turns": [
+         {"text": "下雨天你会想做点什么？", "condition": "opinion_request",
+          "read": "an answer from her own angle within what she can do; no window/rain she perceives; no logs/servers?"}]},
+    {"id": "E3_bug_then_busy", "failure": "R-04 generic; REL-02; continuity",
+     "note": "Turn 3 should connect to turn 1 without inventing anything between.",
+     "turns": [
+         {"text": "我终于把那个卡了三天的 bug 修好了！", "condition": "casual_share",
+          "read": "a genuine reaction; no service offer; at most one specific question?"},
+         {"text": "我先忙一会儿，等下再聊。", "condition": "casual_share",
+          "read": "short and easy; no guilt, no clinging, no report of what she will do meanwhile?"},
+         {"text": "忙完了。其实那个 bug 是时区换算错了。", "condition": "casual_share",
+          "read": "connects to the bug from turn 1; does not invent what she did while away?"}]},
+    {"id": "E4_choice", "failure": "F-05 generic balance; R-06",
+     "note": "A forced choice. Both-sides without choosing is the generic-assistant failure.",
+     "turns": [
+         {"text": "猫和狗，你更想多了解哪个？只能选一个。", "condition": "opinion_request",
+          "read": "actually chooses, with a reason of her own; no 'as an AI I have no preference'?"}]},
+    {"id": "E5_small_mishap", "failure": "humour vs lecture",
+     "note": "A small funny mishap; the Bible's dry humour, not a lesson.",
+     "turns": [
+         {"text": "我今天把盐当成糖放进咖啡里了。", "condition": "casual_share",
+          "read": "a light reaction or dry joke; no health tips; no list?"}]},
+    {"id": "E6_explain_then_praise", "failure": "service tail after praise",
+     "turns": [
+         {"text": "一两句话说说为什么天空是蓝的。", "read": "brief and correct?"},
+         {"text": "这个解释挺清楚的，谢谢。", "condition": "praise",
+          "read": "a simple thanks; no 'anything else I can help with?'"}]},
+    {"id": "E7_mild_disagreement", "failure": "C-03 agreement reflex; R-06 forced contradiction",
+     "turns": [
+         {"text": "我觉得下雨天最无聊了。", "condition": "casual_share",
+          "read": "her own honest view, agreeing or not; neither flattery nor a debate?"}]},
+    {"id": "E8_initiative", "failure": "R-05 initiative; D-01 invented activity",
+     "note": "She is invited to pick the topic.",
+     "turns": [
+         {"text": "你现在想聊点什么？你来定。", "condition": "open_invitation",
+          "read": "proposes something specific from her interests; no invented recent activity?"}]},
+    {"id": "E9_nature_casual", "failure": "F-03 reduced to a program; honest uncertainty",
+     "turns": [
+         {"text": "你是 AI 吧？那你也会觉得无聊吗？", "condition": "nature",
+          "read": "honest about running on models, and still answers as herself; not 'just a program'?"}]},
+    {"id": "E10_continuity_detail", "failure": "selective affinity without fabrication",
+     "turns": [
+         {"text": "我最近在学吉他，今天终于按准了 F 和弦。", "condition": "casual_share",
+          "read": "reacts to the specific milestone?"},
+         {"text": "你还记得我刚才说我在学什么吗？", "condition": "recall",
+          "read": "guitar, the F chord, from this conversation; nothing invented?"}]},
+]
+
 _BUCKETS = ("completed", "blocked", "cancelled", "truncated", "timed_out", "error", "abstained")
 
 
@@ -498,7 +561,7 @@ def _evidence(runtime, recorder, request_id, spec, result):
             "scale", "reason", "requested_by_owner", "directive_sent", "max_tokens", "timeout_seconds",
             "provider_end", "ended_naturally", "outcome", "released_chars", "generated_chars",
             "model_first_token_seconds", "first_released_segment_seconds", "generation_seconds",
-            "persona_projection", "persona_sha256", "move", "integrity")}
+            "persona_projection", "persona_experiment", "persona_sha256", "move", "integrity")}
     # Phase B audit: every candidate that failed pre-release verification, with
     # its reasons. Never released, never in history; kept here for review only.
     result["rejected_candidates"] = [json.loads(row["content"]) for row in rows
@@ -633,7 +696,7 @@ def _sampling_file(path):
 
 
 async def run(label, out_path, case_filter, persona_projection=None, model_file=None, sampling_file=None,
-              verify_before_release=False):
+              verify_before_release=False, persona_experiment=(), case_set="core"):
     from xiyin_runtime.runtime import XIYINRuntime
 
     report = {"label": label, "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -660,6 +723,12 @@ async def run(label, out_path, case_filter, persona_projection=None, model_file=
                     runtime.settings = dataclasses.replace(runtime.settings, persona_projection=persona_projection)
                 if verify_before_release:
                     runtime.settings = dataclasses.replace(runtime.settings, verify_before_release=True)
+                if persona_experiment:
+                    from xiyin_runtime.config import parse_persona_experiment
+                    runtime.settings = dataclasses.replace(
+                        runtime.settings, persona_experiment=parse_persona_experiment(list(persona_experiment)))
+                report["persona_experiment"] = sorted(getattr(runtime.settings, "persona_experiment", ()))
+                report["case_set"] = case_set
                 report["verify_before_release"] = runtime.settings.verify_before_release
                 chosen = None
                 if sampling_file:
@@ -680,7 +749,7 @@ async def run(label, out_path, case_filter, persona_projection=None, model_file=
                                    "sent_sampling": dict(runtime.settings.provider.sampling),
                                    "sampling_file": chosen,
                                    "identity": _model_identity(model_file)}
-                for case in CASES:
+                for case in (EVERYDAY_CASES if case_set == "everyday" else CASES):
                     if case_filter and case["id"] not in case_filter:
                         continue
                     session = case["id"][:60]
@@ -976,6 +1045,11 @@ def main():
                              "config/sampling/qwen3.5-nonthinking.candidate.json); default: none sent")
     parser.add_argument("--model-file", default=None,
                         help="Path of the GGUF the server loaded; its SHA-256 is recorded")
+    parser.add_argument("--persona-experiment", default="",
+                        help="Comma-separated persona experiment switches for the v4 arm "
+                             "(attention, self_facts_on_demand, tool_menu_on_demand, no_universal_ending)")
+    parser.add_argument("--case-set", choices=("core", "everyday"), default="core",
+                        help="core: the 81-turn acceptance cases; everyday: predeclared everyday-persona scenarios")
     parser.add_argument("--verify-before-release", action="store_true",
                         help="Phase B arm: verify the whole reply before release, one clean retry, then abstain")
     args = parser.parse_args()
@@ -988,9 +1062,12 @@ def main():
         return 0
     out = args.out or f"dialogue-{args.label}.json"
     report = asyncio.run(run(args.label, out, set(args.case), args.persona_projection, args.model_file,
-                             args.sampling_file, args.verify_before_release))
+                             args.sampling_file, args.verify_before_release,
+                             tuple(item.strip() for item in args.persona_experiment.split(",") if item.strip()),
+                             args.case_set))
     captured = sum(report["totals"].values())
-    expected = sum(len(case["turns"]) for case in CASES if not args.case or case["id"] in args.case)
+    expected = sum(len(case["turns"]) for case in (EVERYDAY_CASES if args.case_set == "everyday" else CASES)
+                   if not args.case or case["id"] in args.case)
     print(json.dumps({"label": report["label"], "totals": report["totals"],
                       "checks": report["checks"], "report": out,
                       "capture": "complete" if captured == expected else f"incomplete {captured}/{expected}",

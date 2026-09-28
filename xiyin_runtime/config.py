@@ -26,6 +26,30 @@ class Settings:
     # it is released, one clean regeneration, then the runtime abstention.
     # Default off; turning it on is an experiment arm until the owner adopts it.
     verify_before_release: bool = False
+    # Persona repair experiment switches (2026-09-28), each independently
+    # testable and all off by default. They apply to the v4 projection only,
+    # so every arm is "v4 plus these", comparable with the archived v4 runs.
+    persona_experiment: frozenset = frozenset()
+
+
+# attention: the decision layer turns the Bible's tendencies into a
+#   conditional per-turn attention cue on sharing and opinion turns;
+# self_facts_on_demand: "你靠模型、程序…" leaves the standing prompt and is
+#   disclosed on turns asking about her nature;
+# tool_menu_on_demand: the registered-interface menu appears on task turns only;
+# no_universal_ending: the "说完就停…" line is no longer appended to every move.
+PERSONA_EXPERIMENTS = frozenset({"attention", "self_facts_on_demand", "tool_menu_on_demand", "no_universal_ending"})
+
+
+def parse_persona_experiment(values) -> frozenset:
+    if isinstance(values, str):
+        values = [item.strip() for item in values.split(",") if item.strip()]
+    if not isinstance(values, (list, tuple, set, frozenset)) or not all(isinstance(v, str) for v in values):
+        raise ValueError("persona_experiment.enabled must be a list of names")
+    unknown = set(values) - PERSONA_EXPERIMENTS
+    if unknown:
+        raise ValueError("unknown persona experiment: " + ", ".join(sorted(unknown)))
+    return frozenset(values)
 
 
 def load_settings() -> Settings:
@@ -50,6 +74,7 @@ def load_settings() -> Settings:
     verify = config.get("integrity", {}).get("verify_before_release", False)
     if type(verify) is not bool:
         raise ValueError("integrity.verify_before_release must be true or false")
+    experiment = parse_persona_experiment(config.get("persona_experiment", {}).get("enabled", []))
     projection = foundation.get("persona_projection", "v3")
     if projection not in {"v1", "v2", "v3", "v4", "v5"}:
         raise ValueError("foundation.persona_projection must be v1, v2, v3, v4 or v5")
@@ -70,5 +95,6 @@ def load_settings() -> Settings:
         idle_sleep_seconds=idle_sleep,
         persona_projection=projection,
         verify_before_release=verify,
+        persona_experiment=experiment,
         **values,
     )

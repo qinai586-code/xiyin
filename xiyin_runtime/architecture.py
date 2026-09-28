@@ -120,7 +120,7 @@ class RuntimeServices:
         """The runtime facts as prompt text (see conversation_fact_projection)."""
         return self.conversation_fact_projection(session_id, scope, register).text
 
-    def conversation_fact_projection(self, session_id, scope, register="v1"):
+    def conversation_fact_projection(self, session_id, scope, register="v1", *, include_tools=True):
         """Runtime facts with provenance given where each part is built.
 
         What is connected and her current state are true facts she is told to
@@ -128,7 +128,8 @@ class RuntimeServices:
         receipts is a private instruction. The text is the same either way.
         """
         if register in {"v3", "v5"}:
-            return fact_projection(self._spoken_fact_parts(session_id, scope, facts_only=register == "v5"))
+            return fact_projection(self._spoken_fact_parts(session_id, scope, facts_only=register == "v5",
+                                                           include_tools=include_tools))
         available = [item for item in self.body.capabilities() if item["available"]]
         parts = list(RUNTIME_FACT_PARTS)
         if available or self.speech is not None:
@@ -155,7 +156,7 @@ class RuntimeServices:
             pass
         return fact_projection(parts)
 
-    def _spoken_fact_parts(self, session_id, scope, *, facts_only=False):
+    def _spoken_fact_parts(self, session_id, scope, *, facts_only=False, include_tools=True):
         """The v3 register of the runtime facts: same facts, her situation.
 
         ``facts_only`` is v5: the same facts without the rule clauses (the
@@ -171,7 +172,10 @@ class RuntimeServices:
         parts = list(RUNTIME_FACT_PARTS_V5 if facts_only else RUNTIME_FACT_PARTS_V3)
         if available or self.speech is not None:
             parts[0] = (True, "文字和记录已接上；动作要通过已登记的接口执行，对方同意也不会让你多出能力。")
-            for item in available:
+            # Experiment tool_menu_on_demand: the per-interface menu is what the
+            # ceiling-02 ablation removed (tool talk 51→10 / 70→10 of 648); the
+            # capability line above stays, so she still knows actions need one.
+            for item in available if include_tools else ():
                 parts += [(True, "\n已登记接口：" + item["adapter_id"] + "，可执行：" + "、".join(item["operations"]) + "。"),
                           (False, "做完要看回执。")]
             if self.speech is not None:

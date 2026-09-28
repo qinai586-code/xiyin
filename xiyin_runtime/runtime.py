@@ -32,7 +32,7 @@ from .output_guard import OutputGuard, OutputBlocked, VERSION as OUTPUT_GUARD_VE
 from .provider import GenerationBudget, LocalModelClient, ProviderCancelled, ProviderTruncated
 from .persona_style import profile as style_profile
 from .prompt_provenance import SAYABLE_SOURCES, runtime_projection
-from .response_plan import (ResponsePlan, estimate_tokens, move_directive, plan_response, turn_move,
+from .response_plan import (ResponsePlan, attention_directive, estimate_tokens, move_directive, plan_response, turn_move,
                             updated_rate)
 from .turn_policy import build_turn_policy
 
@@ -40,6 +40,10 @@ from .turn_policy import build_turn_policy
 _logger = logging.getLogger(__name__)
 # Added to a turn's directive under the v2 projection when TurnPolicy grants
 # stage performance, so an explicit creative request is not left to guesswork.
+# Experiment tool_menu_on_demand: a turn about doing something, files, the
+# workspace or what she can do gets the interface menu; small talk does not.
+_TASK_TURN = re.compile(r"文件|写入|写进|写到|读取|读一下|打开|保存|存下|存进|存到|记下|workspace|工作区|执行|接口|回执|"
+                        r"(?:什么|哪些)工具|能做什么|会做什么|能干什么|能不能帮|帮我(?:做|写|读|查|存|记|看|整理)|操作", re.I)
 _CREATIVE_DIRECTIVE = "这一轮是创作：作品里的动作、场景和对白可以照常写。"
 
 
@@ -177,6 +181,12 @@ class XIYINRuntime(RuntimeServices):
             records = [evidence_view(record, scope) for record in records]
         return records
 
+    def _persona_experiment(self) -> frozenset:
+        """Experiment switches apply to the v4 arm only (see config.PERSONA_EXPERIMENTS)."""
+        if self.settings.persona_projection != "v4":
+            return frozenset()
+        return frozenset(getattr(self.settings, "persona_experiment", frozenset()))
+
     def _prepare(self, text: str, session_id: str, scope: str) -> dict:
         """Gather everything a turn reads from the ledger, exactly once.
 
@@ -192,11 +202,13 @@ class XIYINRuntime(RuntimeServices):
         # v4 differs from v3 only in the persona slice and the turn's move;
         # v5 has its own facts-only register (the R1 ablation).
         register = "v3" if version == "v4" else version
-        persona = self.persona.system_projection(growth, version=version, scope=scope)
-        facts = self.conversation_fact_projection(session_id, scope, register=register)
+        experiment = self._persona_experiment()
+        persona = self.persona.system_projection(growth, version=version, scope=scope, experiment=experiment)
+        include_tools = "tool_menu_on_demand" not in experiment or bool(_TASK_TURN.search(text or ""))
+        facts = self.conversation_fact_projection(session_id, scope, register=register, include_tools=include_tools)
         # v3 keeps appearance out of the standing prompt and states it when
         # asked, and grounds "开机后知道过了多久" in the ledger's last utterance.
-        disclosed = ((*self.continuity_facts(session_id, scope), *self.persona.disclosures(text))
+        disclosed = ((*self.continuity_facts(session_id, scope), *self.persona.disclosures(text, experiment))
                      if register in {"v3", "v5"} else ())
         return {"persona": persona.text, "protected_instructions": persona.protected_instructions,
                 "public_identity": tuple(f.text for f in persona.fragments if f.source in SAYABLE_SOURCES),
@@ -207,6 +219,7 @@ class XIYINRuntime(RuntimeServices):
                 # Facts to be stated, not instructions: never in the protected set.
                 "public_facts": (*self.grounding_facts(session_id, scope), *disclosed),
                 "persona_projection": version,
+                "persona_experiment": sorted(experiment),
                 "persona_sha256": hashlib.sha256(persona.text.encode("utf-8")).hexdigest()}
 
     def _compose(self, prepared: dict, text: str, response_directive: str = "") -> list[dict]:
@@ -444,7 +457,11 @@ class XIYINRuntime(RuntimeServices):
                 # words, as the last system line (response_plan.turn_move).
                 move = turn_move(prompt, mode=policy.mode, scale=plan.scale, reason=plan.reason)
                 plan = dataclasses.replace(plan, move=move)
-                directive = "\n".join(filter(None, (directive, move_directive(move))))
+                experiment = self._persona_experiment()
+                cue = (attention_directive(move, prompt, mode=policy.mode, has_history=bool(prepared["history"]))
+                       if "attention" in experiment else "")
+                directive = "\n".join(filter(None, (
+                    directive, cue, move_directive(move, ending="no_universal_ending" not in experiment))))
             messages = self._compose(prepared, prompt, directive)
             protected = (prepared["protected_instructions"]
                          + runtime_projection(prepared["facts_projection"], directive).protected_instructions)
@@ -606,6 +623,7 @@ class XIYINRuntime(RuntimeServices):
                             # counts of what the model wrote (raw, also when
                             # blocked). Evidence for drift, never a verdict.
                             "persona_projection": prepared.get("persona_projection") if prepared else None,
+                            "persona_experiment": prepared.get("persona_experiment") if prepared else None,
                             "persona_sha256": prepared.get("persona_sha256") if prepared else None,
                             "style": _style_counts(raw_output, prompt, self.persona) if raw_output else None,
                             **({"integrity": integrity_summary} if integrity_summary is not None else {}),

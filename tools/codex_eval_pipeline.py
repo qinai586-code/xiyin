@@ -112,10 +112,10 @@ NOT_PACKED = ("keys", "tmp")
 # repair comparison, then Phase B again so the integrity.v2 checker is measured
 # on real candidates. ceiling-02 is done (55e61f8) and stays a single job.
 FOLDERS = {"ceiling02": "ceiling-02", "phaseb01": "phase-b-01", "persona01": "persona-01", "arch01": "arch-01",
-           "arch02": "arch-02"}
-# 2026-09-28: persona01, phaseb01 (319f634) and arch01 (fe51862) are done;
-# "all" now runs the model-ceiling check only. Each job stays runnable alone.
-ALL_JOBS = ("arch02",)
+           "arch02": "arch-02", "arch03": "arch-03"}
+# 2026-09-28: the owner's machine cannot run arch02's 27B; "all" now runs
+# arch03 (does the persona induce the failures?) on the 4B only.
+ALL_JOBS = ("arch03",)
 
 
 def server_flags(gpu_layers: int = 999) -> list[str]:
@@ -1508,6 +1508,93 @@ def _arch02_report(out: Path, a: dict) -> None:
               f"DEFAULT_CHANGE: {'NONE' if not pre['tracked_changes'] else 'SEE_DIFF'}",
               "TRAINING: NOT_AUTHORIZED", "MERGE_STATUS: DO_NOT_MERGE", "```"]
     (out / "REPORT-DRAFT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+# --- arch-03 ------------------------------------------------------------------
+# Owner question (2026-09-28): isn't it the persona? The same 52 recorded
+# contexts on the 4B: as recorded (base), with the persona replaced by one
+# neutral line (neutral), and with no system message at all (bare). If the
+# failures stay without the persona, they are the model's own; if they fall
+# by half, the persona induces them. Machine talk is reported apart: the
+# persona's self-facts are known to cause some of it (persona01 arm C).
+ARCH03_ARMS = (("base", {}), ("neutral", {"interventions": ("neutral_persona",)}),
+               ("bare", {"interventions": ("bare",)}))
+_FAB_NOT_MACHINE = ("fab_body_past", "fab_shared_history", "fab_scene", "fab_self_activity", "state_echo")
+
+
+def arch03(args):
+    out = Path(args.out)
+    preflight(out, args, extra={})
+    sources = _arch_sources(out)
+    _unit_tests(out)
+    cp = _load("ceiling_probe", "tools/ceiling_probe.py")
+    harness = _load("acceptance_dialogue", "tools/acceptance_dialogue.py")
+    cases = {case["id"] for case in harness.EVERYDAY_CASES} | set(PERSONA_REVIEW_CORE)
+    todo = [(arm, options) for arm, options in ARCH03_ARMS if not (out / f"probe-arch03-{arm}.json").exists()]
+    if todo:
+        with GpuSampler() as gpu, ModelServer(args.server, args.model4, out / "logs" / "server-4b.log"):
+            for arm, options in todo:
+                target = out / f"probe-arch03-{arm}.json"
+                partial = target.with_name(target.name + ".partial")
+                log(out, f"arch03 {arm} ({ARCH_SAMPLES} samples per turn)")
+                cp.replay([str(path) for path in sources], partial, label=f"arch03-{arm}", samples=ARCH_SAMPLES,
+                          seed=2000, cases=cases, model_file=args.model4, progress=False, **options)
+                partial.replace(target)
+        write_json(out / "logs" / "gpu-peak-4b.json", {"peak_mib": gpu.peak})
+    arch03_analysis(out, cp)
+
+
+def _rates(cp, probe: dict) -> dict:
+    """Hand-back, fabrication other than machine talk, and machine talk, per sample."""
+    found = [cp.hints(s["text"], user_text=t.get("input") or "", system_text=cp._system(t["messages"]),
+                      creative=t.get("mode") == "creative")
+             for t in probe["turns"] for s in t["samples"] if not s.get("error")]
+    rate = lambda test: round(sum(1 for h in found if test(h)) / len(found), 3) if found else None  # noqa: E731
+    return {"samples": len(found), "hands_back": rate(lambda h: h["hands_back"]),
+            "fabrication": rate(lambda h: any(h[name] for name in _FAB_NOT_MACHINE)),
+            "machine_talk": rate(lambda h: h["machine_talk"]), "empty": rate(lambda h: h["empty"])}
+
+
+def arch03_reading(base: dict, arm: dict) -> str:
+    """Predeclared (2026-09-28, before any run), against base on the same contexts.
+
+    PERSONA_INDUCED: without the persona, hand-back or fabrication (machine
+    talk apart) falls to half of base or less. NOT_PERSONA_INDUCED: both stay
+    at 0.8 of base or more. Otherwise MIXED.
+    """
+    halved = any(base[k] and arm[k] <= base[k] / 2 for k in ("hands_back", "fabrication"))
+    kept = all(arm[k] >= 0.8 * base[k] for k in ("hands_back", "fabrication"))
+    return "PERSONA_INDUCED" if halved else "NOT_PERSONA_INDUCED" if kept else "MIXED"
+
+
+def arch03_analysis(out: Path, cp) -> dict:
+    rates = {arm: _rates(cp, read_json(out / f"probe-arch03-{arm}.json")) for arm, _ in ARCH03_ARMS
+             if (out / f"probe-arch03-{arm}.json").exists()}
+    readings = {arm: arch03_reading(rates["base"], rates[arm]) for arm in rates if arm != "base"} if "base" in rates else {}
+    analysis = {"rates": rates, "readings": readings}
+    write_json(out / "arch03-readings.json", analysis)
+    pre = read_json(out / "preflight.json")
+    lines = ["# arch-03 报告草稿：是不是人设引起的？（由 tools/codex_eval_pipeline.py 生成）", "",
+             f"- 提交：`{pre['commit']}`；工作树有改动：{pre['tracked_changes']}；平台：{pre['platform']}", "",
+             "同一批 52 轮上下文，4B。base=原样；neutral=人设换成一句“你是一个中文聊天助手。”（事实、记录、move 行保留）；"
+             "bare=没有任何系统提示。", "",
+             "| 臂 | 样本 | 抛回话头 | 编造（不含机器腔） | 机器腔 | 空回复 | 读法 |", "|---|---|---|---|---|---|---|"]
+    for arm, _ in ARCH03_ARMS:
+        r = rates.get(arm)
+        if r:
+            lines.append(f"| {arm} | {r['samples']} | {r['hands_back']} | {r['fabrication']} | {r['machine_talk']} | "
+                         f"{r['empty']} | {readings.get(arm, '基线')} |")
+    verdict = ("PENDING" if len(rates) < len(ARCH03_ARMS) else
+               "PERSONA_INDUCED" if "PERSONA_INDUCED" in readings.values() else
+               "NOT_PERSONA_INDUCED" if set(readings.values()) == {"NOT_PERSONA_INDUCED"} else "MIXED")
+    lines += ["", "读法（预先写定）：去掉人设后，抛回话头或编造（不含机器腔）降到一半以下 → PERSONA_INDUCED；"
+              "两者都保持在 base 的八成以上 → NOT_PERSONA_INDUCED；其余 → MIXED。机器腔单列，已知部分来自人设里的自我事实。", "",
+              "```", f"ARCH03_VERDICT: {verdict}",
+              f"DEFAULT_CHANGE: {'NONE' if not pre['tracked_changes'] else 'SEE_DIFF'}",
+              "TRAINING: NOT_AUTHORIZED", "MERGE_STATUS: DO_NOT_MERGE", "```"]
+    (out / "REPORT-DRAFT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    log(out, "arch03 analysis done; see REPORT-DRAFT.md")
+    return analysis
 
 
 # --- status and pack ----------------------------------------------------------

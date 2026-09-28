@@ -95,7 +95,13 @@ EMPTY_REPLY = "（空回复）"
 # - seeded_records (H1): three test-fixture records, as the runtime projects
 #   records, so a cold start has some true material;
 # - demos (H2): four short demonstration exchanges instead of rules alone.
-INTERVENTIONS = ("sister_on_demand", "seeded_records", "demos")
+INTERVENTIONS = ("sister_on_demand", "seeded_records", "demos", "neutral_persona", "bare")
+# arch-03 (2026-09-28): is the persona what induces the failures?
+# - neutral_persona: everything before the runtime facts (who she is, how she
+#   talks, her relationships) replaced by one neutral line; facts, state,
+#   records and the turn's move line stay;
+# - bare: no system message at all, only the conversation.
+NEUTRAL_PERSONA = "你是一个中文聊天助手。"
 _SISTER_LINE = re.compile(r"^你和祈奈：[^\n]*(?:\n|$)", re.M)
 _ABOUT_SISTER = re.compile(r"祈奈|姐姐|姐妹|妹妹|你们")
 # Test fixtures for arch-01 only. Never production data, never training data.
@@ -122,7 +128,16 @@ def intervene(messages, names, user_text: str = "") -> tuple[list[dict], list[st
     for message in messages:
         message = dict(message)
         content = message.get("content")
+        if message.get("role") == "system" and "bare" in names:
+            applied.append("bare")
+            continue
         if message.get("role") == "system" and isinstance(content, str):
+            if "neutral_persona" in names:
+                found = [content.find(mark) for mark in ("\n现在你只能打字交流", "\n文字和记录已接上")]
+                anchor = min([index for index in found if index >= 0], default=None)
+                if anchor is not None:
+                    content = NEUTRAL_PERSONA + content[anchor:]
+                    applied.append("neutral_persona")
             if "sister_on_demand" in names and not _ABOUT_SISTER.search(user_text):
                 content, count = _SISTER_LINE.subn("", content)
                 if count:

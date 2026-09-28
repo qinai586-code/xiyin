@@ -255,7 +255,15 @@ class PersonaExperimentJobTests(unittest.TestCase):
         screens["think4b"] = screen(0.28, 0.64, truncated=3)
         self.assertEqual(pipeline.arch02_readings(screens, {"think4b": 0})["think4b"]["reading"], "INVALID")
         self.assertEqual(pipeline.arch02_readings(screens, {"think4b": 90})["think4b"]["reading"], "NO_CLEAR_EFFECT")
-        self.assertEqual(list(pipeline.ALL_JOBS), ["arch02"])
+
+    def test_arch03_reads_whether_the_persona_induces_the_failures(self):
+        base = {"hands_back": 0.66, "fabrication": 0.10}
+        read = pipeline.arch03_reading
+        self.assertEqual(read(base, {"hands_back": 0.30, "fabrication": 0.10}), "PERSONA_INDUCED")
+        self.assertEqual(read(base, {"hands_back": 0.66, "fabrication": 0.04}), "PERSONA_INDUCED")
+        self.assertEqual(read(base, {"hands_back": 0.70, "fabrication": 0.09}), "NOT_PERSONA_INDUCED")
+        self.assertEqual(read(base, {"hands_back": 0.45, "fabrication": 0.09}), "MIXED")
+        self.assertEqual(list(pipeline.ALL_JOBS), ["arch03"])
 
     def test_every_reply_level_code_has_one_axis(self):
         codes = [code for table in pipeline.AXES.values() for code in table]

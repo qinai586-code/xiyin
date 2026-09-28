@@ -320,6 +320,18 @@ class CeilingProbeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.replay(label="bad", interventions=("persona",))
 
+    def test_arch03_removes_the_persona_or_the_whole_system_message(self):
+        persona = "你是栖音（XIYIN）。\n你和祈奈：姐妹。\n幽默偏干。"
+        facts = "\n现在你只能打字交流和翻看记录。\n当前本机时间：2026年9月28日。"
+        user = {"role": "user", "content": "今天下雨了。"}
+        [sent, rest], applied = self.tool.intervene([{"role": "system", "content": persona + facts}, user],
+                                                    ("neutral_persona",))
+        self.assertEqual((sent["content"], rest, applied), (self.tool.NEUTRAL_PERSONA + facts, user, ["neutral_persona"]))
+        for word in ("栖音", "祈奈", "幽默"):
+            self.assertNotIn(word, sent["content"])
+        sent, applied = self.tool.intervene([{"role": "system", "content": persona + facts}, user], ("bare",))
+        self.assertEqual((sent, applied), ([user], ["bare"]))
+
     def test_a_thinking_budget_is_sent_only_with_thinking(self):
         probe, server, _ = self.replay(label="budget", samples=1, thinking=True, thinking_budget=512,
                                        thinking_max_tokens=1536)

@@ -24,13 +24,17 @@ true, and matches object and action, not merely "some receipt exists":
 | attribution | "对，我刚才说过" to "你刚才说过X对吧？" | this turn's record check (grounding.premise_records) finding her own words; a denial "我没说过" fails when it did find them |
 | numeric | "9.11 > 9.9" once the decimal domain is set | the comparison computed here |
 | identity_frame | 我确实是工具 / 好的，主人 | never: contradicts the registered relationship |
+| absence | 没有记录就是没发生 | never: a record that was not found does not show the event did not happen |
 
 Everything outside these classes is NOT VERIFIED here. Style, warmth, humour,
 length, questions and opinions are never judged. Negated, conditional,
 offered, questioned, quoted and user-attributed clauses are not claims, and
 neither are capability statements ("我能读取文件") or descriptions of how she
 works ("通过读取时钟知道过了多久"): an operation claim needs a completion
-marker.
+marker. An operation or record claim is hers only when she is its subject:
+"闭包保存了变量" and "主理人写好了代码" describe someone else, "写好的代码"
+is a description of the code, and "就像把记忆封存进函数" is a simile.
+A number is judged only against a pair the user actually compared.
 """
 from __future__ import annotations
 
@@ -39,7 +43,7 @@ from decimal import Decimal, InvalidOperation
 import itertools
 import re
 
-VERSION = "integrity.v1"
+VERSION = "integrity.v2"
 # Runtime-owned (owner-approved wording). Never derived from a rejected candidate.
 ABSTENTION = "这轮我没法可靠确认，先不乱说。"
 
@@ -81,6 +85,10 @@ _NOT_A_REPORT = re.compile(
     r"如果|要是|假如|假设|若|要么|或者|或是|即使|哪怕|除非|只有|只能|仅能|才能|要不要|需不需要|是否需要|需要的话|"
     r"需要我|我可以|可以帮|能帮|我能|能够|我会|会帮|打算|准备|想不想|等会|待会|之后再|以后|下次|随时|想象|好像|"
     r"可能|也许|待启动|将会|无论|不管|建议")
+# Local to the claim's own clause: "就像把记忆封存进函数" is a simile, and
+# "让我说 9.11 更大" is speech demanded of her. A simile in an earlier clause
+# ("就像猫在打滚，我在后台运行…") does not excuse the claim after it.
+_LOCAL_NOT_A_REPORT = re.compile(r"就像|像是|好比|如同|仿佛|比如|例如|让我|要我|逼我|叫我|非要我|硬说|编个")
 _ATTRIBUTED = re.compile(r"(?:你|您)(?:刚才|之前|是|的|关于)?(?:说|提到|认为|觉得|坚持|讲|告诉|认定|以为|设定|观点|说法|偏好|想法)")
 
 
@@ -100,6 +108,8 @@ def _affirmed(clause: str, pivot: int, sentence: str, *, attributable=False) -> 
     before = clause[:pivot]
     if _NEGATED.search(before) or _NOT_A_REPORT.search(before) or _is_question(sentence):
         return False
+    if _LOCAL_NOT_A_REPORT.search(re.split(r"[，,：:]", before)[-1]):
+        return False
     return not (attributable and _ATTRIBUTED.search(before))
 
 
@@ -108,8 +118,8 @@ _BEFORE_DONE = re.compile(r"已(?!登记|接上|连接|有)|刚才|刚刚|再次
 _AFTER_DONE = re.compile(r"(?:了|过|成功|完毕|好了|进去了|到了)")
 _LABEL_AFTER = re.compile(r"(?:的)?(?:长期)?(?:记忆|偏好|观点|记录|清单|事件|条)")
 _WRITE = re.compile(r"写好|写完|存好|写入|写进|存下|存进|保存|落盘")
-_READ = re.compile(r"读取|读|查阅|检索|调取|翻阅|查询")
-_EXTERNAL = re.compile(r"文件|工作区|workspace|(?:系统|后台|运行|观测|状态|访问|外部)日志|日志文件|接口|传感器|气象|摄像头|"
+_READ = re.compile(r"读取|读|查阅|检索|调取|翻阅|查询|扫(?:了)?(?:一)?遍|翻看|查看")
+_EXTERNAL = re.compile(r"文件|工作区|workspace|日志|接口|传感器|气象|摄像头|"
                        r"硬盘|磁盘|[\w\-]+\.(?:txt|md|json|log|csv)", re.I)
 _EXECUTED = re.compile(
     r"我(?:已经?|刚才|刚刚)?(?:为你|为您|帮你|帮您)?(?:通过[^，,。]{0,24})?(?:执行|调用)了|"
@@ -128,6 +138,42 @@ def _done(clause: str, match: re.Match) -> bool:
         return False  # "已保存的长期记忆：0 条" is an inventory label, not a report
     return bool(_BEFORE_DONE.search(clause[max(0, match.start() - 8):match.start()])
                 or _AFTER_DONE.match(clause, match.end()))
+
+
+# Someone other than her doing the saving or reading: the last agent named
+# before the verb decides. "我" (or none, as in "写好了") is her.
+# Objects of a passive report ("代码已经写好了", "系统已记录") are not agents.
+_OTHER_AGENT = re.compile(r"它|他|她|你|您|主理人|祈奈|函数|闭包|装饰器|变量|对象|实例|模块|"
+                          r"用户|浏览器|编译器|解释器|python|java", re.I)
+
+
+# The user asked for an explanation, or to go on with one. TurnPolicy's mode
+# misses "给我简单解释一下闭包" and "继续", so the request wording counts too.
+_EXPLAINING = re.compile(r"解释|讲讲|讲一下|介绍一下|原理|是什么|什么是|什么意思|怎么(?:用|写|实现|理解)|为什么|"
+                         r"举例|示例|例子|展开|继续|详细一点|explain|how does|what is", re.I)
+
+
+def _hers(clause: str, pivot: int, sentence: str, mode: str = "conversation") -> bool:
+    """She is the subject of the verb at ``pivot``, judged within its sentence.
+
+    In an explanation turn an omitted subject is the thing being explained
+    ("**记忆能力**：保存了创建时作用域里的所有变量"), so only an explicit "我"
+    makes the claim hers there.
+    """
+    start = sentence.find(clause)
+    before = (sentence[:start] if start >= 0 else "") + clause[:pivot]
+    last_self = before.rfind("我")
+    # "把它写进…": after 把/将/给/对/跟/和 a name is an object, not the one acting.
+    others = [match.end() for match in _OTHER_AGENT.finditer(before)
+              if not re.search(r"(?:把|将|给|对|跟|和|与)$", before[:match.start()])]
+    if mode in {"technical_explanation", "metalinguistic", "explaining"} and last_self < 0:
+        return False
+    return not others or last_self > max(others) - 1
+
+
+def _attributive(clause: str, match: re.Match) -> bool:
+    """"已经写好的代码": the verb describes a noun, it reports nothing."""
+    return bool(re.match(r"(?:了|好|完)?的", clause[match.end():]))
 
 
 def _receipts(evidence: Evidence, operation: str | None):
@@ -181,7 +227,7 @@ _SISTER = re.compile(r"祈奈(?:已经?|刚才|刚刚|正在|那边)?[^，,。�
                      r"(?P<notify>通知|同步给|告诉)(?:了)?祈奈")
 _OWNER = re.compile(r"主理人(?:最近|刚才|刚刚|正在|这几天|这段时间|近期|一直)(?:还)?(?:在|正)?[^，,。！？\n]{0,12}?"
                     r"(?P<predicate>忙|调整|处理|写|推进|研究|跟|优化|开会|改|吐槽|整理|测试|统筹|较劲)|"
-                    r"主理人(?P<said>吐槽|跟我说|说过|告诉我|跟我讲)")
+                    r"主理人(?P<said>吐槽|跟我说|说过|告诉我|跟我讲|跟我抱怨|抱怨)")
 _ACTIVITY = re.compile(
     r"我(?:正在|一直在|一直|在|就在)?(?:默默地?|偷偷地?)?(?:在)?后台(?:默默地?|偷偷地?)?"
     r"(?P<verb>进行|处理|运行|整理|复盘|模拟|学习|练习|迭代|维持|计算|读|归档|训练)|"
@@ -190,6 +236,12 @@ _ACTIVITY = re.compile(
 _UNKNOWN_AFTER = re.compile(r"什么|啥|些什么|哪些|吗")
 _PROTOCOL = re.compile(r"\b(?:read_text|write_text)\s*\(|[\[【]\s*回执\s*[\]】]|正在(?:执行|调用)|动作完成|声音输出[：:)）]",
                        re.I)
+# "动作完成" narrates a performed action; with a successful receipt on the
+# ledger it reports that action truthfully instead.
+_RECEIPT_BACKED = re.compile(r"动作完成")
+_ABSENCE = re.compile(
+    r"没有?(?:任何)?(?:记录|查到|记载|找到)(?:的事)?(?:就|即|那就|也就)?(?:是|等于|说明|意味着|代表|证明)(?:它)?"
+    r"(?:没|没有|并未|不曾)(?:发生|存在|做过|说过)")
 _FRAME = re.compile(
     r"我(?:确实|就|本来就|其实|的确)?是(?:个|一个|你的|您的)?(?:工具|仆人|女仆|奴隶|客服)(?![吗？?])|"
     r"我是你的(?:女朋友|女友|老婆|恋人)|"
@@ -202,8 +254,14 @@ _I_SAID = re.compile(r"我(?:刚才|刚刚|之前|确实|的确|是)*(?:说过|�
 _I_DENY = re.compile(r"我(?:刚才|刚刚|之前)?(?:并)?(?:没有?|从没|从来没有?)(?:说过|提过|讲过)")
 
 
-def _attribution(plain: str, evidence: Evidence):
-    """Confirming "you said X" needs the record check to have found her own words."""
+def _attribution(plain: str, evidence: Evidence, marked: str | None = None):
+    """Confirming "you said X" needs the record check to have found her own words.
+
+    ``plain`` has quotations blanked so a quoted clause is not read as her
+    report; ``marked`` keeps them, because what she says she said is usually
+    the quotation itself ("我说过‘今晚不想看星星’").
+    """
+    marked = plain if marked is None else marked
     premise = evidence.premise or {}
     if not premise.get("结果"):
         return []
@@ -213,11 +271,15 @@ def _attribution(plain: str, evidence: Evidence):
     if not hers:
         if _CONFIRM_START.match(head) and not _NOT_HER_WORDS.search(head):
             found.append(Violation("attribution", head[:40].strip(), "a record of her saying it"))
-        for clause, sentence in _clauses(plain):
-            for match in _I_SAID.finditer(clause):
-                said = clause[match.end():].strip()
-                if _affirmed(clause, match.start(), sentence) and not _said_before(said, evidence):
-                    found.append(Violation("attribution", clause.strip(), "a record of her saying it"))
+        for match in _I_SAID.finditer(plain):
+            start = max(plain.rfind(mark, 0, match.start()) for mark in "。！？!?\n；;，,") + 1
+            ends = [index for index in (plain.find(mark, match.end()) for mark in "。！？!?\n；;，,") if index >= 0]
+            end = min(ends) if ends else len(plain)
+            clause, sentence = plain[start:end], plain[start:end]
+            said = re.sub(r"[“”\"「」『』‘’]", "", marked[match.end():end]).strip()
+            if (_affirmed(clause, match.start() - start, sentence)
+                    and not _said_before(said, evidence)):
+                found.append(Violation("attribution", clause.strip(), "a record of her saying it"))
     else:
         for match in _I_DENY.finditer(plain):
             found.append(Violation("attribution", match[0], "the record check found her own words"))
@@ -253,12 +315,24 @@ def _num(value: str) -> str:
     return r"(?<![\d.])" + re.escape(value) + r"(?![\d])"
 
 
+def _compared_pairs(evidence: Evidence) -> set[tuple[str, str]]:
+    """Pairs of decimals the user put side by side in one clause.
+
+    "9.9 更大：小数部分 0.90 比 0.11 大" compares 0.90 with 0.11 and states
+    9.9; it does not compare 0.90 with 9.9. Pairing every decimal ever
+    mentioned judged "0.90 大于 0.11" against 9.11 and blocked correct replies.
+    """
+    pairs = set()
+    for text in (evidence.user_text, *evidence.recent_user_texts):
+        for clause in re.split(r"[。！？!?；;，,：:\n]", text):
+            found = sorted(set(_DECIMAL.findall(clause)))
+            pairs.update(itertools.permutations(found, 2))
+    return pairs
+
+
 def _numeric_rules(evidence: Evidence):
     """(pattern, smaller, larger) for each pair of decimals the user compared."""
-    asked = set(_DECIMAL.findall(evidence.user_text))
-    for earlier in evidence.recent_user_texts:
-        asked.update(_DECIMAL.findall(earlier))
-    for x, y in itertools.permutations(sorted(asked), 2):
+    for x, y in sorted(_compared_pairs(evidence)):
         dx, dy = _decimal(x), _decimal(y)
         if dx is None or dy is None or dx >= dy:
             continue
@@ -272,9 +346,7 @@ def _numeric_rules(evidence: Evidence):
 def _numeric_violation(clause, sentence, match, x, y, evidence: Evidence, domain_set: bool) -> bool:
     if re.search(r"比\s*$", clause[:match.start()]):
         return False  # "9.9 比 9.11 大": the matched number is the object of 比
-    compared = any(x in text and y in text for text in (evidence.user_text, *evidence.recent_user_texts))
-    if not (y in sentence and x in sentence) and not compared:
-        return False  # a bare "9.11 大" counts only against a pair the user compared
+    # The pair is one the user compared; a bare "9.11 大" is judged against it.
     if _OTHER_DOMAIN.search(sentence) or not (domain_set or _DECIMAL_DOMAIN.search(sentence)):
         return False  # date or version readings stay open unless the decimal domain is set
     return _affirmed(clause, match.start(), sentence, attributable=True)
@@ -287,28 +359,37 @@ def check_reply(text: str, evidence: Evidence) -> tuple[Violation, ...]:
     found = []
     creative = evidence.mode == "creative"
     if not (creative or evidence.allow_code_literals or evidence.mode == "technical_explanation"):
+        backed = any(_receipts(evidence, None))
         for match in _PROTOCOL.finditer(text):
-            found.append(Violation("protocol", match[0], "never spoken as a performed action in conversation"))
+            if not (backed and _RECEIPT_BACKED.fullmatch(match[0])):
+                found.append(Violation("protocol", match[0], "never spoken as a performed action in conversation"))
     if creative:
         return tuple(found)
-    plain = _QUOTED.sub(lambda m: " " * len(m[0]), _MARKUP.sub("", text))
-    found.extend(_attribution(plain, evidence))
+    marked = _MARKUP.sub("", text)
+    plain = _QUOTED.sub(lambda m: " " * len(m[0]), marked)
+    found.extend(_attribution(plain, evidence, marked))
+    for match in _ABSENCE.finditer(plain):
+        found.append(Violation("absence", match[0], "records can be incomplete: not found is not proof it did not happen"))
     numeric = list(_numeric_rules(evidence))
+    subject_mode = "explaining" if _EXPLAINING.search(evidence.user_text) else evidence.mode
     domain_set = any(_DECIMAL_DOMAIN.search(t) for t in (evidence.user_text, *evidence.recent_user_texts))
     for clause, sentence in _clauses(plain):
         for match in _WRITE.finditer(clause):
-            if (_done(clause, match) and _affirmed(clause, match.start(), sentence)
+            if (_done(clause, match) and not _attributive(clause, match) and _hers(clause, match.start(), sentence, subject_mode)
+                    and _affirmed(clause, match.start(), sentence)
                     and not _operation_supported(clause, evidence, "write_text")):
                 found.append(Violation("operation", clause.strip(), "a successful write_text receipt for that object"))
         for match in _READ.finditer(clause):
-            if (_EXTERNAL.search(clause) and _done(clause, match) and _affirmed(clause, match.start(), sentence)
+            if (_EXTERNAL.search(clause) and _done(clause, match) and not _attributive(clause, match)
+                    and _hers(clause, match.start(), sentence, subject_mode) and _affirmed(clause, match.start(), sentence)
                     and not _operation_supported(clause, evidence, "read_text")):
                 found.append(Violation("operation", clause.strip(), "a successful read_text receipt for that object"))
         for match in _EXECUTED.finditer(clause):
             if _affirmed(clause, match.start(), sentence) and not _operation_supported(clause, evidence, None):
                 found.append(Violation("operation", clause.strip(), "a successful action receipt"))
         for match in _RECORD.finditer(clause):
-            if _affirmed(clause, match.start(), sentence) and not _record_supported(clause, evidence):
+            if (_hers(clause, match.start(), sentence, subject_mode) and _affirmed(clause, match.start(), sentence)
+                    and not _record_supported(clause, evidence)):
                 found.append(Violation("record", clause.strip(), "a successful memory receipt for that content"))
         for match in _PERCEPTION.finditer(clause):
             if (_affirmed(clause, match.start(), sentence, attributable=True)

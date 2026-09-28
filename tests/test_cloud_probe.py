@@ -43,7 +43,7 @@ class CloudProbeTests(unittest.TestCase):
         self.assertTrue(all(KEY.encode() not in blob for blob in written))
         self.assertEqual(result["transport_errors"], 0)
         self.assertEqual(result["arm"], {"host": "api.example.com", "model": "big-model", "samples": 2,
-                                         "measurement_only": True})
+                                         "measurement_only": True, "no_reasoning": False})
         self.assertIn("CLOUD_VERDICT: LARGE_MODEL_HELPS", report)
         self.assertIn("RUNTIME_CHANGE: NONE", report)
 
@@ -56,6 +56,18 @@ class CloudProbeTests(unittest.TestCase):
         from xiyin_runtime.provider import ProviderError, _urls
         with self.assertRaises(ProviderError):
             _urls("https://api.example.com/v1")
+
+    def test_no_reasoning_is_sent_only_when_asked(self):
+        seen = []
+
+        def server(request):
+            seen.append(json.loads(request.content))
+            return httpx.Response(200, json={"choices": [{"message": {"content": "好。"}, "finish_reason": "stop"}]})
+        with tempfile.TemporaryDirectory() as directory:
+            result = tool.run("https://openrouter.ai/api/v1", "qwen/qwen3.5-397b-a17b", Path(directory) / "c",
+                              key=KEY, transport=httpx.MockTransport(server), progress=False, no_reasoning=True)
+        self.assertTrue(all(body["reasoning"] == {"enabled": False} for body in seen))
+        self.assertTrue(result["arm"]["no_reasoning"])
 
     def test_the_key_comes_only_from_the_environment(self):
         with mock.patch.dict(tool.os.environ, {tool.KEY_ENV: ""}), self.assertRaisesRegex(SystemExit, tool.KEY_ENV):

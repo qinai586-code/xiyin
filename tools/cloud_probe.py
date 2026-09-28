@@ -51,10 +51,10 @@ def chat_url(base_url: str) -> str:
     return base if base.endswith("/chat/completions") else base + "/chat/completions"
 
 
-def _sample(client, url, key, model, messages, max_tokens, split_thinking) -> dict:
+def _sample(client, url, key, model, messages, max_tokens, split_thinking, extra=None) -> dict:
     import httpx
 
-    payload = {"model": model, "messages": messages, "max_tokens": max_tokens, "stream": False}
+    payload = {"model": model, "messages": messages, "max_tokens": max_tokens, "stream": False, **(extra or {})}
     record = {"text": "", "thinking": None, "finish_reason": None, "completion_tokens": None,
               "seconds": None, "error": None}
     started = time.monotonic()
@@ -87,7 +87,10 @@ def _sample(client, url, key, model, messages, max_tokens, split_thinking) -> di
     return record
 
 
-def run(base_url: str, model: str, out: Path, *, key: str, transport=None, progress=True) -> dict:
+def run(base_url: str, model: str, out: Path, *, key: str, transport=None, progress=True,
+        no_reasoning: bool = False) -> dict:
+    """``no_reasoning`` sends OpenRouter's switch for hybrid models, so the local
+    arms' non-thinking setting holds; other providers may reject the field."""
     import httpx
 
     pipeline = _load("codex_eval_pipeline", "tools/codex_eval_pipeline.py")
@@ -97,7 +100,9 @@ def run(base_url: str, model: str, out: Path, *, key: str, transport=None, progr
     out.mkdir(parents=True, exist_ok=True)
     sources = pipeline._arch_sources(out)
     cases = {case["id"] for case in harness.EVERYDAY_CASES} | set(pipeline.PERSONA_REVIEW_CORE)
-    arm = {"host": urlsplit(url).hostname, "model": model, "samples": SAMPLES, "measurement_only": True}
+    arm = {"host": urlsplit(url).hostname, "model": model, "samples": SAMPLES, "measurement_only": True,
+           "no_reasoning": no_reasoning}
+    extra = {"reasoning": {"enabled": False}} if no_reasoning else None
     cloud = {"kind": cp.KIND, "label": "cloud", "arm": arm, "corpus_role": "EVAL_HOLDOUT",
              "training_allowed": False, "turns": []}
     recorded = {"kind": cp.KIND, "label": "recorded4b", "arm": {"source": "persona01 A arm, one sample"},
@@ -113,7 +118,7 @@ def run(base_url: str, model: str, out: Path, *, key: str, transport=None, progr
                         "messages": turn["sent_messages"], "original": ""}
                 recorded["turns"].append({**base, "samples": [
                     {"text": turn.get("raw_generation") or "", "error": None, "finish_reason": "stop"}]})
-                samples = [_sample(client, url, key, model, turn["sent_messages"], budget, cp.split_thinking)
+                samples = [_sample(client, url, key, model, turn["sent_messages"], budget, cp.split_thinking, extra)
                            for _ in range(SAMPLES)]
                 cloud["turns"].append({**base, "samples": samples})
                 if progress:
@@ -159,11 +164,13 @@ def main(argv=None) -> int:
     parser.add_argument("--base-url", required=True, help="OpenAI-compatible API base, e.g. https://…/v1")
     parser.add_argument("--model", required=True, help="the model name your provider's console shows")
     parser.add_argument("--out", required=True)
+    parser.add_argument("--no-reasoning", action="store_true",
+                        help="OpenRouter: send reasoning.enabled=false so a hybrid model answers without thinking")
     args = parser.parse_args(argv)
     key = os.environ.get(KEY_ENV, "").strip()
     if not key:
         raise SystemExit(f"set the key in the environment first: $env:{KEY_ENV} = \"<your key>\"")
-    result = run(args.base_url, args.model, Path(args.out), key=key)
+    result = run(args.base_url, args.model, Path(args.out), key=key, no_reasoning=args.no_reasoning)
     print(Path(args.out) / "REPORT-DRAFT.md")
     print(Path(args.out).with_suffix(".zip"))
     return 0 if result["transport_errors"] == 0 else 1

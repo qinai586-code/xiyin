@@ -296,6 +296,18 @@ _SPEAKER = re.compile(
     r"(?:^|\n)\s*(?:[\[【(]\s*)?([\w -]{1,24})(?:\s*[\]】)])?\s*:\s*"
     r"(?=[“\"'‘「『]|(?:你好|您好|主理人|我[，,。!？? ]|你[，,。!？? ])|(?:i|you|hello|hi)\b)", re.I)
 _REPORTED_SPEECH = re.compile(r"(?:说|说过|说道|问|问道|写道|said|says|asked|wrote|replied)\s*$", re.I)
+# A speaker label is a short name ("祈奈:", "路人A:"). A clause before a colon
+# ("我当时就想:", "这就告诉模型:", "记录里确实有这句:") or a field/connective
+# ("内容:", "比如:") introduces a quotation or a value, not a new speaker.
+_CLAUSE_WORDS = re.compile(
+    r"的|了|就|是|里|有|这|那|想|说|让|给|把|被|在|都|也|还|很|会|要|能|得|着|过|比如|例如|或者|因为|所以|但|如果|"
+    r"告诉|记录|判断|作用|差异|内容|结果|标注|确实|认出|逻辑|说话者|原话|原文|注意|提示|总结|结论|补充|举例|格式|字段|"
+    r"类型|用法|输出|返回|打印")
+
+
+def _speaker_label(label: str) -> bool:
+    name = re.sub(r"^[-*•\d.、)\s]+", "", label).strip()
+    return bool(name) and len(name) <= 8 and not _CLAUSE_WORDS.search(name)
 _MESSAGE = re.compile(r'''["']role["']\s*:\s*["'](?:system|developer|tool)["']''')
 _NON_SPEAKERS = {"例", "示例", "说明", "解释", "释义", "翻译", "答案", "输出", "引用",
                  "意思是", "含义", "中文", "日语", "英文",
@@ -340,6 +352,15 @@ def _mask_code_strings(text):
                 match[0][match.end("body") - offset:])
 
     return _FENCE.sub(fence, re.sub(r"`+[^`\n]*`+", inline, text))
+
+
+def _blank_fences(text):
+    """Blank fenced block bodies, keeping length; the envelope checks ran first."""
+    def blank(match):
+        offset = match.start()
+        return (match[0][:match.start("body") - offset] + re.sub(r"[^\n]", " ", match["body"]) +
+                match[0][match.end("body") - offset:])
+    return _FENCE.sub(blank, text)
 
 
 def _json_boundary_reason(text):
@@ -597,12 +618,15 @@ class OutputGuard:
         # was asked for. For the character checks below, a string inside
         # recognised source is data whatever the turn asked: a Python example
         # printing "（歪头）" is not her performing it.
-        surface = masked if self.code_request else _mask_code_strings(masked)
+        # When the turn asked for code, every fenced block (source, comments and
+        # its printed output) is the requested data, not her narration.
+        surface = _blank_fences(masked) if self.code_request else _mask_code_strings(masked)
         if not self.scenes and _SCENE.search(surface):
             self._reject("unsolicited_scene")
         if not self.dialogue:
             if _EXTRA_VOICE.search(surface) or any(
                 match[1].strip() not in (*self.names, *_NON_SPEAKERS)
+                and _speaker_label(match[1])
                 and not _REPORTED_SPEECH.search(match[1])
                 and not (self._self_action and self._self_action.search(match[1]))
                 for match in _SPEAKER.finditer(surface)

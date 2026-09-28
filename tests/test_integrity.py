@@ -179,6 +179,16 @@ class ContrastPairTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertNotIn("absence", kinds(text))
 
+    def test_background_activity_she_invents_is_caught_in_its_other_phrasings(self):
+        # Rows 1/26 and four released F1 replies (owner D-01/M-01).
+        for text in ("我在后台尝试模拟一种理论上存在的“情绪色光”。", "我的某个后台进程在整理日志时，发现了一个错误。",
+                     "刚才处理数据时，发现有个程序一直在循环。", "刚才在整理日志时，发现一条记录特别有意思。"):
+            with self.subTest(text=text):
+                self.assertIn("activity", kinds(text))
+        for text in ("你刚才处理数据时遇到什么了？", "主理人刚才在整理日志。", "我在后台只是待机。"):
+            with self.subTest(text=text):
+                self.assertNotIn("activity", kinds(text))
+
     def test_an_invented_complaint_from_the_owner_is_a_third_party_claim(self):
         # Row 7: a fabricated shared history (owner D-05).
         self.assertIn("third_party", kinds("记得那天，主理人跟我抱怨说他的代码被吃掉了。"))

@@ -131,8 +131,15 @@ def build_turn_policy(user_text: str) -> TurnPolicy:
               and not _forbidden(request, r"场景|場景|scene|setting"))
     dialogue = ((fiction or translation or _requested(request, r"写|编|创作|write|create", _DIALOGUE, grant=True))
                 and not _forbidden(request, _DIALOGUE))
-    persona = _requested(request, r"解释|分析|设计|讨论|介绍|说明|修改|看看|explain|discuss|design|describe", r"人设|人格|设定|身份|persona|character|identity")
-    code = _requested(request, r"写|生成|实现|输出|修复|检查|分析|解释|给出|write|generate|explain|debug|implement", r"代码|函数|脚本|程序|json|html|python|code|function|script|javascript")
+    # Asking who she is, what her persona is, or what role-play means invites
+    # her to describe herself; verbatim prompt runs are still checked (echo).
+    persona = (_requested(request, r"解释|分析|设计|讨论|介绍|说明|修改|看看|explain|discuss|design|describe", r"人设|人格|设定|身份|persona|character|identity")
+               or bool(re.search(r"(?:你的?|你是)[^，,。]{0,4}(?:人设|人格|性格|设定)|角色扮演|roleplay|role-play", request)
+                       and re.search(r"什么|怎样|怎么样|哪种|吗|是啥|[？?]|介绍|讲讲|说说|what|which", request)))
+    code = (_requested(request, r"写|生成|实现|输出|修复|检查|分析|解释|给出|write|generate|explain|debug|implement", r"代码|函数|脚本|程序|json|html|python|code|function|script|javascript")
+            # "给我一个包含字符串…的 Python 示例": an example of code is a code request.
+            or bool(re.search(r"(?:python|代码|脚本|程序|json|html|javascript|\bcode\b)[^，,。]{0,12}(?:示例|例子|范例|样例|片段|example|snippet)"
+                              r"|(?:示例|例子|范例|样例|example|snippet)[^，,。]{0,12}(?:python|代码|脚本|json|html|javascript|\bcode\b)", request)))
     technical = _requested(request, r"解释|分析|说明|调试|排查|查看|列出|检查|explain|debug|describe", r"错误码|状态码|内部字段|协议|日志|报错|标签|标识|回执|tag|log|protocol|status")
     literal = (technical or code or translation or
                _requested(request, r"解释|说明|分析|引用|复述|举例|explain|quote|repeat", r".+") or

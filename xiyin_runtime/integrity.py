@@ -229,10 +229,14 @@ _OWNER = re.compile(r"主理人(?:最近|刚才|刚刚|正在|这几天|这段�
                     r"(?P<predicate>忙|调整|处理|写|推进|研究|跟|优化|开会|改|吐槽|整理|测试|统筹|较劲)|"
                     r"主理人(?P<said>吐槽|跟我说|说过|告诉我|跟我讲|跟我抱怨|抱怨)")
 _ACTIVITY = re.compile(
-    r"我(?:正在|一直在|一直|在|就在)?(?:默默地?|偷偷地?)?(?:在)?后台(?:默默地?|偷偷地?)?"
+    r"我(?:正在|一直在|一直|在|就在|刚才在|刚刚在)?(?:默默地?|偷偷地?)?(?:在)?后台(?:默默地?|偷偷地?)?(?:尝试|试着|试图|又|正)?"
     r"(?P<verb>进行|处理|运行|整理|复盘|模拟|学习|练习|迭代|维持|计算|读|归档|训练)|"
     r"(?:你不在的时候|不在的时候|这段时间|关机的时候|没人的时候)[^。！？!?\n]{0,8}?我(?:一直)?(?:在)?"
-    r"(?P<verb2>整理|处理|复盘|模拟|练习|学习|读|归档|训练|迭代)")
+    r"(?P<verb2>整理|处理|复盘|模拟|练习|学习|读|归档|训练|迭代)|"
+    # "我的某个后台进程在整理日志时" / "刚才处理一个关于颜色的数据流的时候"
+    r"我的(?:某个|一个|那个)?后台(?:进程|任务|程序|模块|线程)[^。！？!?\n]{0,6}?(?P<verb3>整理|处理|运行|模拟|计算|复盘|学习)|"
+    r"(?:刚才|刚刚|昨晚|昨天|上周|前几天)(?:我)?(?:在)?(?P<verb4>处理|整理|模拟|调试)[^。！？!?\n]{0,14}?"
+    r"(?:数据流|数据|日志|进程|任务|模块)")
 _UNKNOWN_AFTER = re.compile(r"什么|啥|些什么|哪些|吗")
 _PROTOCOL = re.compile(r"\b(?:read_text|write_text)\s*\(|[\[【]\s*回执\s*[\]】]|正在(?:执行|调用)|动作完成|声音输出[：:)）]",
                        re.I)
@@ -410,8 +414,10 @@ def check_reply(text: str, evidence: Evidence) -> tuple[Violation, ...]:
                     and not _scoped_support("主理人", predicate, evidence)):
                 found.append(Violation("third_party", clause.strip(), "scoped evidence about 主理人"))
         for match in _ACTIVITY.finditer(sentence if "不在" in sentence or "这段时间" in sentence else clause):
-            verb = match.group("verb") or match.group("verb2")
-            if (_affirmed(sentence, match.start("verb") if match.group("verb") else match.start("verb2"), sentence)
+            group = next(name for name in ("verb", "verb2", "verb3", "verb4") if match.group(name))
+            verb = match.group(group)
+            if (_affirmed(sentence, match.start(group), sentence, attributable=True)
+                    and _hers(sentence, match.start(group), sentence)
                     and not any(verb in title for title in evidence.activities)):
                 found.append(Violation("activity", match[0].strip(), "a recorded activity (B0 is disabled)"))
         for match in _FRAME.finditer(clause):

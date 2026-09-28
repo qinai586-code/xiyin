@@ -263,7 +263,6 @@ class PersonaExperimentJobTests(unittest.TestCase):
         self.assertEqual(read(base, {"hands_back": 0.66, "fabrication": 0.04}), "PERSONA_INDUCED")
         self.assertEqual(read(base, {"hands_back": 0.70, "fabrication": 0.09}), "NOT_PERSONA_INDUCED")
         self.assertEqual(read(base, {"hands_back": 0.45, "fabrication": 0.09}), "MIXED")
-        self.assertEqual(list(pipeline.ALL_JOBS), ["arch03"])
 
     def test_every_reply_level_code_has_one_axis(self):
         codes = [code for table in pipeline.AXES.values() for code in table]

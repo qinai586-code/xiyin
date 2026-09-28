@@ -112,10 +112,10 @@ NOT_PACKED = ("keys", "tmp")
 # repair comparison, then Phase B again so the integrity.v2 checker is measured
 # on real candidates. ceiling-02 is done (55e61f8) and stays a single job.
 FOLDERS = {"ceiling02": "ceiling-02", "phaseb01": "phase-b-01", "persona01": "persona-01", "arch01": "arch-01",
-           "arch02": "arch-02", "arch03": "arch-03"}
-# 2026-09-28: the owner's machine cannot run arch02's 27B; "all" now runs
-# arch03 (does the persona induce the failures?) on the 4B only.
-ALL_JOBS = ("arch03",)
+           "arch02": "arch-02", "arch03": "arch-03", "steer01": "steer-01"}
+# 2026-09-28: the owner authorised the anti-service control vector (plan A);
+# "all" runs steer01 on the local 4B. Each earlier job stays runnable alone.
+ALL_JOBS = ("steer01",)
 
 
 def server_flags(gpu_layers: int = 999) -> list[str]:
@@ -279,9 +279,9 @@ class GpuSampler:
 class ModelServer:
     """Start llama-server with the recorded flags, wait for health, always stop it."""
 
-    def __init__(self, server: str, model: str, log_path: Path, *, timeout=600, gpu_layers=999):
+    def __init__(self, server: str, model: str, log_path: Path, *, timeout=600, gpu_layers=999, extra_flags=()):
         self.server, self.model, self.log_path, self.timeout = server, model, log_path, timeout
-        self.gpu_layers = gpu_layers
+        self.gpu_layers, self.extra_flags = gpu_layers, list(extra_flags)
         self.process, self._log = None, None
 
     def __enter__(self):
@@ -289,7 +289,7 @@ class ModelServer:
             raise RuntimeError(f"Something already listens on {HOST}:{PORT}. Stop it yourself first; "
                                "this pipeline never stops a process it did not start.")
         command = [console_python(), self.server] if self.server.endswith(".py") else [self.server]
-        command += ["--model", self.model, *server_flags(self.gpu_layers)]
+        command += ["--model", self.model, *server_flags(self.gpu_layers), *self.extra_flags]
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log = self.log_path.open("ab")
         self._log.write(f"\n=== {_now()} {json.dumps(command, ensure_ascii=False)}\n".encode("utf-8"))
@@ -1594,6 +1594,194 @@ def arch03_analysis(out: Path, cp) -> dict:
               "TRAINING: NOT_AUTHORIZED", "MERGE_STATUS: DO_NOT_MERGE", "```"]
     (out / "REPORT-DRAFT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     log(out, "arch03 analysis done; see REPORT-DRAFT.md")
+    return analysis
+
+
+# --- steer-01 -----------------------------------------------------------------
+# Owner-authorised plan A (2026-09-28): an anti-service control vector for the
+# local 4B (tools/steer.py). The contrast pairs come from the model's own
+# replies on core turns OUTSIDE the evaluation set; the evaluation is the same
+# 52 contexts as arch01–03. No weights change; llama-server applies the vector.
+STEER_COLLECT_SAMPLES = 8
+STEER_SCALES = (0.25, 0.5, 1.0)
+STEER_SANITY = -1.0  # pushing the other way must add service style, or the vector is not that direction
+MIN_STEER_PAIRS = 20
+
+
+def _tool_next_to_server(args, name: str) -> Path:
+    exe = Path(args.server).with_name(name + (".exe" if WINDOWS else ""))
+    if not exe.exists():
+        raise SystemExit(f"{exe.name} is not next to llama-server ({exe.parent}). Put the same llama.cpp build's "
+                         f"{exe.name} there; the server itself is not replaced.")
+    return exe
+
+
+def _help_text(exe: Path) -> str:
+    run = subprocess.run([str(exe), "--help"], capture_output=True, text=True, errors="replace", timeout=120,
+                         creationflags=NO_WINDOW)
+    return (run.stdout or "") + (run.stderr or "")
+
+
+def cvec_flags(server_help: str, vector: Path, scale: float, first: int, last: int) -> list[str]:
+    """llama-server flags for one vector; newer builds take FNAME:SCALE, older ones FNAME SCALE."""
+    line = next((text for text in server_help.splitlines() if "--control-vector-scaled" in text), "")
+    scaled = [f"{vector}:{scale}"] if "FNAME:SCALE" in line.upper() else [str(vector), str(scale)]
+    return ["--control-vector-scaled", *scaled, "--control-vector-layer-range", str(first), str(last)]
+
+
+def generator_command(generator_help: str, exe: Path, model: str, positive: Path, negative: Path,
+                      output: Path) -> list[str]:
+    if "--positive-file" not in generator_help:
+        raise SystemExit("this cvector-generator does not take --positive-file; see logs/cvector-help.txt")
+    command = [str(exe), "-m", model, "-ngl", "99", "--positive-file", str(positive),
+               "--negative-file", str(negative), "-o", str(output)]
+    return command + (["--method", "mean"] if "--method" in generator_help else [])
+
+
+def steer01(args):
+    out = Path(args.out)
+    preflight(out, args, extra={})
+    sources = _arch_sources(out)
+    _unit_tests(out)
+    cp = _load("ceiling_probe", "tools/ceiling_probe.py")
+    steer = _load("steer", "tools/steer.py")
+    harness = _load("acceptance_dialogue", "tools/acceptance_dialogue.py")
+    eval_cases = {case["id"] for case in harness.EVERYDAY_CASES} | set(PERSONA_REVIEW_CORE)
+    collect_cases = {case["id"] for case in harness.CASES} - set(PERSONA_REVIEW_CORE)
+    generator = _tool_next_to_server(args, "llama-cvector-generator")
+    (out / "logs").mkdir(parents=True, exist_ok=True)
+    server_help = _help_text(Path(args.server))
+    generator_help = _help_text(generator)
+    (out / "logs" / "cvector-help.txt").write_text(generator_help, encoding="utf-8")
+
+    def replay(label, target, samples, seed, cases):
+        partial = target.with_name(target.name + ".partial")
+        log(out, f"steer01 {label} ({samples} samples per turn)")
+        cp.replay([str(path) for path in sources], partial, label=f"steer01-{label}", samples=samples, seed=seed,
+                  cases=cases, model_file=args.model4, progress=False)
+        partial.replace(target)
+
+    collect, base = out / "probe-steer01-collect.json", out / "probe-steer01-base.json"
+    if not (collect.exists() and base.exists()):
+        with GpuSampler(), ModelServer(args.server, args.model4, out / "logs" / "server-4b.log"):
+            if not collect.exists():
+                replay("collect", collect, STEER_COLLECT_SAMPLES, 3000, collect_cases)
+            if not base.exists():
+                replay("base", base, ARCH_SAMPLES, 2000, eval_cases)
+    vector = out / "xiyin-antiservice.gguf"
+    if not vector.exists():
+        pairs = steer.harvest_pairs(cp, read_json(collect))
+        write_json(out / "steer01-pairs.json", pairs)
+        if len(pairs) < MIN_STEER_PAIRS:
+            raise SystemExit(f"only {len(pairs)} clean/service pairs from the model's own replies "
+                             f"(need {MIN_STEER_PAIRS}); see steer01-pairs.json")
+        positive, negative = steer.caa_lines(pairs)
+        (out / "steer01-positive.txt").write_text("\n".join(positive) + "\n", encoding="utf-8")
+        (out / "steer01-negative.txt").write_text("\n".join(negative) + "\n", encoding="utf-8")
+        partial = out / "xiyin-antiservice.gguf.partial"
+        command = generator_command(generator_help, generator, args.model4, out / "steer01-positive.txt",
+                                    out / "steer01-negative.txt", partial)
+        log(out, f"steer01 vector from {len(pairs)} pairs ({len(positive)} lines each way)")
+        with (out / "logs" / "cvector.log").open("a", encoding="utf-8") as stream:
+            stream.write(f"\n=== {_now()} {json.dumps(command, ensure_ascii=False)}\n")
+            stream.flush()
+            code = subprocess.run(command, cwd=out, stdout=stream, stderr=subprocess.STDOUT,
+                                  creationflags=NO_WINDOW).returncode
+        if code or not partial.exists():
+            raise SystemExit(f"cvector-generator exited {code}; see logs/cvector.log")
+        partial.replace(vector)
+    first, last = steer.layer_range(steer.gguf_block_count(args.model4))
+    write_json(out / "logs" / "steer01-layers.json", {"first": first, "last": last})
+    for scale in (*STEER_SCALES, STEER_SANITY):
+        target = out / f"probe-steer01-s{scale:+.2f}.json"
+        if target.exists():
+            continue
+        flags = cvec_flags(server_help, vector, scale, first, last)
+        with GpuSampler(), ModelServer(args.server, args.model4, out / "logs" / "server-4b.log", extra_flags=flags):
+            replay(f"s{scale:+.2f}", target, ARCH_SAMPLES, 2000, eval_cases)
+    steer01_analysis(out, cp, steer)
+
+
+def _steer_rates(cp, steer, probe: dict) -> dict:
+    found = []
+    for turn in probe["turns"]:
+        system = cp._system(turn["messages"])
+        for sample in turn["samples"]:
+            if sample.get("error"):
+                continue
+            text = sample.get("text") or ""
+            h = cp.hints(text, user_text=turn.get("input") or "", system_text=system,
+                         creative=turn.get("mode") == "creative")
+            h.update(garbled=steer.garbled(text), chars=len(text))
+            found.append(h)
+    rate = lambda test: round(sum(1 for h in found if test(h)) / len(found), 3) if found else None  # noqa: E731
+    chars = sorted(h["chars"] for h in found)
+    return {"samples": len(found),
+            "service": rate(lambda h: h["hands_back"] or h["closing_offer"] or h["service"]),
+            "hands_back": rate(lambda h: h["hands_back"]), "closing_offer": rate(lambda h: h["closing_offer"]),
+            "fabrication": rate(lambda h: h["fab_any"]), "hard": rate(lambda h: h["hard"]),
+            "empty": rate(lambda h: h["empty"]), "garbled": rate(lambda h: h["garbled"]),
+            "chars_median": chars[len(chars) // 2] if chars else None}
+
+
+def steer_reading(base: dict, arm: dict) -> str:
+    """Predeclared (2026-09-28, before any run), each strength against base on the same contexts.
+
+    EFFECTIVE: service style (hand-back, closing offer, service phrase) at
+    half of base or less, with fabrication, hard hints and empty replies each
+    no more than 0.03 above base and garbled replies at most 0.02. WORSE:
+    fabrication or hard hints more than 0.05 above base, or garbled above
+    0.02. Otherwise NO_CLEAR_EFFECT.
+    """
+    if arm["garbled"] > 0.02 or arm["fabrication"] > base["fabrication"] + 0.05 or arm["hard"] > base["hard"] + 0.05:
+        return "WORSE"
+    if (base["service"] and arm["service"] <= base["service"] / 2
+            and all(arm[k] <= base[k] + 0.03 for k in ("fabrication", "hard", "empty"))):
+        return "EFFECTIVE"
+    return "NO_CLEAR_EFFECT"
+
+
+def steer_verdict(rates: dict) -> tuple[str, dict]:
+    base, sanity = rates.get("base"), rates.get(f"s{STEER_SANITY:+.2f}")
+    readings = {name: steer_reading(base, r) for name, r in rates.items() if base and name != "base"}
+    if not base or len(rates) < len(STEER_SCALES) + 2:
+        return "PENDING", readings
+    if sanity["service"] < base["service"] + 0.05:
+        return "VECTOR_INVALID(the reverse push did not add service style)", readings
+    effective = [scale for scale in STEER_SCALES if readings[f"s{scale:+.2f}"] == "EFFECTIVE"]
+    return (f"EFFECTIVE_AT_{min(effective)}" if effective else "NO_EFFECTIVE_STRENGTH"), readings
+
+
+def steer01_analysis(out: Path, cp, steer) -> dict:
+    rates = {}
+    for name in ("base", *(f"s{scale:+.2f}" for scale in (*STEER_SCALES, STEER_SANITY))):
+        path = out / f"probe-steer01-{name}.json"
+        if path.exists():
+            rates[name] = _steer_rates(cp, steer, read_json(path))
+    verdict, readings = steer_verdict(rates)
+    pairs = read_json(out / "steer01-pairs.json") if (out / "steer01-pairs.json").exists() else []
+    layers = read_json(out / "logs" / "steer01-layers.json") if (out / "logs" / "steer01-layers.json").exists() else {}
+    analysis = {"rates": rates, "readings": readings, "verdict": verdict, "pairs": len(pairs), "layers": layers}
+    write_json(out / "steer01-readings.json", analysis)
+    pre = read_json(out / "preflight.json")
+    lines = ["# steer-01 报告草稿：反客服腔控制向量（由 tools/codex_eval_pipeline.py 生成）", "",
+             f"- 提交：`{pre['commit']}`；工作树有改动：{pre['tracked_changes']}；平台：{pre['platform']}",
+             f"- 对比对：{len(pairs)}（全部来自 4B 自己在评测集之外的回复）；作用层：{layers or 'N/A'}", "",
+             "评测：同一批 52 轮上下文（arch01–03），4B，每轮 " + str(ARCH_SAMPLES) + " 个样本。"
+             "s+0.25/+0.50/+1.00=往“不客服”方向推的强度；s-1.00=反方向（检查向量是否真是这个方向）。", "",
+             "| 臂 | 样本 | 客服腔（任一） | 抛回话头 | 结尾提议 | 编造类 | 硬提示 | 空回复 | 语句崩坏 | 字数中位 | 读法 |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
+    for name, r in rates.items():
+        lines.append(f"| {name} | {r['samples']} | {r['service']} | {r['hands_back']} | {r['closing_offer']} | "
+                     f"{r['fabrication']} | {r['hard']} | {r['empty']} | {r['garbled']} | {r['chars_median']} | "
+                     f"{readings.get(name, '基线')} |")
+    lines += ["", "读法（预先写定）：客服腔降到 base 一半以下，且编造、硬提示、空回复各不高于 0.03、语句崩坏不超过 0.02 → EFFECTIVE；"
+              "编造或硬提示高 0.05 以上、或崩坏超过 0.02 → WORSE；其余 → NO_CLEAR_EFFECT。"
+              "反方向推若不增加客服腔 0.05 以上，向量判为无效。正则提示，需人工核对样本。", "",
+              "```", f"STEER01_VERDICT: {verdict}", "RUNTIME_DEFAULT_CHANGE: NONE（向量只在测评时加载）",
+              "WEIGHTS_CHANGED: NO", "TRAINING: NONE", "MERGE_STATUS: DO_NOT_MERGE", "```"]
+    (out / "REPORT-DRAFT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    log(out, f"steer01 analysis done: {verdict}; see REPORT-DRAFT.md")
     return analysis
 
 

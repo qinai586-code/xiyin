@@ -84,6 +84,9 @@ class PipelineTests(unittest.TestCase):
                          ["--control-vector-scaled", "v.gguf:0.5", "--control-vector-layer-range", "13", "29"])
         self.assertEqual(pipeline.cvec_flags(old, vector, -1.0, 13, 29),
                          ["--control-vector-scaled", "v.gguf", "-1.0", "--control-vector-layer-range", "13", "29"])
+        # An absolute path is passed relative to the working directory, so no drive colon reaches FNAME:SCALE.
+        absolute = Path.cwd() / "out" / "v.gguf"
+        self.assertEqual(pipeline.cvec_flags(new, absolute, 0.5, 13, 29)[1], str(Path("out") / "v.gguf") + ":0.5")
         command = pipeline.generator_command("--positive-file --negative-file --method", Path("g"), "m.gguf",
                                              Path("p"), Path("n"), Path("o"))
         self.assertEqual(command[-2:], ["--method", "mean"])

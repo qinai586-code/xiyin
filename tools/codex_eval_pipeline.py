@@ -1625,7 +1625,18 @@ def _help_text(exe: Path) -> str:
 def cvec_flags(server_help: str, vector: Path, scale: float, first: int, last: int) -> list[str]:
     """llama-server flags for one vector; newer builds take FNAME:SCALE, older ones FNAME SCALE."""
     line = next((text for text in server_help.splitlines() if "--control-vector-scaled" in text), "")
-    scaled = [f"{vector}:{scale}"] if "FNAME:SCALE" in line.upper() else [str(vector), str(scale)]
+    if "FNAME:SCALE" in line.upper():
+        # The server splits FNAME:SCALE at a colon, so a Windows drive ("C:\…") would
+        # be read as the separator (steer01, 2026-09-30); pass a relative path instead.
+        try:
+            name = os.path.relpath(vector)
+        except ValueError:  # another drive than the working directory
+            name = str(vector)
+        if ":" in name:
+            raise SystemExit(f"the control vector path {name} contains ':'; run from the same drive")
+        scaled = [f"{name}:{scale}"]
+    else:
+        scaled = [str(vector), str(scale)]
     return ["--control-vector-scaled", *scaled, "--control-vector-layer-range", str(first), str(last)]
 
 
